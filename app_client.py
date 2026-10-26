@@ -16,12 +16,23 @@ class FloatingAssistantBubble:
         self.vm_ip = "192.168.15.132"
         self.port = 65432
 
-        # État de l'interface
+        # État et dimensions de l'interface
         self.is_expanded = False
         self.chat_width = 380
         self.chat_height = 560
         self.bubble_size = 60
         self.margin = 25
+
+        # Position initiale de la bulle (bas droite)
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        self.bubble_x = screen_w - self.bubble_size - self.margin
+        self.bubble_y = screen_h - self.bubble_size - self.margin - 40
+
+        # Variables internes pour le Drag & Drop
+        self._drag_start_x = 0
+        self._drag_start_y = 0
+        self._has_dragged = False
 
         # Fenêtre sans bordures Windows standard et toujours au premier plan
         self.root.overrideredirect(True)
@@ -34,33 +45,39 @@ class FloatingAssistantBubble:
     def _build_ui(self):
         # 1. BULLE FLOTTANTE (Visible quand rétracté)
         self.bubble_frame = tk.Frame(self.root, bg="#121212")
-        self.bubble_btn = tk.Button(
+        self.bubble_btn = tk.Label(
             self.bubble_frame,
             text="🤖",
             bg="#2563eb",
             fg="#ffffff",
-            activebackground="#1d4ed8",
-            activeforeground="#ffffff",
             font=("Segoe UI Emoji", 20),
-            relief=tk.FLAT,
-            bd=0,
-            cursor="hand2",
-            command=self.toggle_chat
+            cursor="fleur"
         )
         self.bubble_btn.pack(fill=tk.BOTH, expand=True)
+
+        # Événements de déplacement pour la bulle
+        self.bubble_btn.bind("<Button-1>", self._on_bubble_press)
+        self.bubble_btn.bind("<B1-Motion>", self._on_bubble_motion)
+        self.bubble_btn.bind("<ButtonRelease-1>", self._on_bubble_release)
 
         # 2. FENÊTRE DE CHAT (Visible quand déplié)
         self.chat_frame = tk.Frame(self.root, bg="#1e1e1e", bd=1, relief=tk.SOLID)
 
         # En-tête : Titre, Statut, Clé API et Réduction
-        header = tk.Frame(self.chat_frame, bg="#252526", pady=8, padx=10)
-        header.pack(fill=tk.X)
+        self.header = tk.Frame(self.chat_frame, bg="#252526", pady=8, padx=10, cursor="fleur")
+        self.header.pack(fill=tk.X)
 
-        self.title_label = tk.Label(header, text="Assistant VM", fg="#ffffff", bg="#252526", font=("Segoe UI", 10, "bold"))
+        # Permet aussi de déplacer la fenêtre de chat via l'en-tête
+        self.header.bind("<Button-1>", self._on_header_press)
+        self.header.bind("<B1-Motion>", self._on_header_motion)
+
+        self.title_label = tk.Label(self.header, text="Assistant VM", fg="#ffffff", bg="#252526", font=("Segoe UI", 10, "bold"))
         self.title_label.pack(side=tk.LEFT)
+        self.title_label.bind("<Button-1>", self._on_header_press)
+        self.title_label.bind("<B1-Motion>", self._on_header_motion)
 
         close_btn = tk.Button(
-            header,
+            self.header,
             text="—",
             fg="#cccccc",
             bg="#252526",
@@ -75,7 +92,7 @@ class FloatingAssistantBubble:
 
         # Bouton pour changer la clé API à tout moment
         key_btn = tk.Button(
-            header,
+            self.header,
             text="🔑",
             fg="#fde047",
             bg="#252526",
@@ -88,7 +105,7 @@ class FloatingAssistantBubble:
         )
         key_btn.pack(side=tk.RIGHT, padx=(5, 5))
 
-        self.status_label = tk.Label(header, text="●", fg="#ff5555", bg="#252526", font=("Segoe UI", 11))
+        self.status_label = tk.Label(self.header, text="●", fg="#ff5555", bg="#252526", font=("Segoe UI", 11))
         self.status_label.pack(side=tk.RIGHT)
 
         # Zone centrale : Journal des logs
@@ -152,17 +169,50 @@ class FloatingAssistantBubble:
         )
         self.send_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=3)
 
-    def toggle_chat(self):
-        if self.is_expanded:
-            self.collapse_chat()
-        else:
+    # --- LOGIQUE DE GLISSER-DÉPOSER (DRAG & DROP) ---
+    def _on_bubble_press(self, event):
+        self._drag_start_x = event.x_root
+        self._drag_start_y = event.y_root
+        self._has_dragged = False
+
+    def _on_bubble_motion(self, event):
+        dx = event.x_root - self._drag_start_x
+        dy = event.y_root - self._drag_start_y
+
+        if abs(dx) > 3 or abs(dy) > 3:
+            self._has_dragged = True
+
+        self.bubble_x += dx
+        self.bubble_y += dy
+        self.root.geometry(f"{self.bubble_size}x{self.bubble_size}+{self.bubble_x}+{self.bubble_y}")
+        self._drag_start_x = event.x_root
+        self._drag_start_y = event.y_root
+
+    def _on_bubble_release(self, event):
+        if not self._has_dragged:
             self.expand_chat()
 
+    def _on_header_press(self, event):
+        self._chat_drag_x = event.x_root - self.root.winfo_x()
+        self._chat_drag_y = event.y_root - self.root.winfo_y()
+
+    def _on_header_motion(self, event):
+        new_x = event.x_root - self._chat_drag_x
+        new_y = event.y_root - self._chat_drag_y
+        self.root.geometry(f"{self.chat_width}x{self.chat_height}+{new_x}+{new_y}")
+        self.bubble_x = new_x + self.chat_width - self.bubble_size
+        self.bubble_y = new_y + self.chat_height - self.bubble_size
+
+    # --- DÉPLOIEMENT / RÉDUCTION DU CHAT ---
     def expand_chat(self):
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
-        x = screen_w - self.chat_width - self.margin
-        y = screen_h - self.chat_height - self.margin - 40
+
+        x = self.bubble_x + self.bubble_size - self.chat_width
+        y = self.bubble_y + self.bubble_size - self.chat_height
+
+        x = max(10, min(x, screen_w - self.chat_width - 10))
+        y = max(10, min(y, screen_h - self.chat_height - 40))
 
         self.bubble_frame.pack_forget()
         self.chat_frame.pack(fill=tk.BOTH, expand=True)
@@ -170,21 +220,15 @@ class FloatingAssistantBubble:
         self.is_expanded = True
 
     def collapse_chat(self):
-        screen_w = self.root.winfo_screenwidth()
-        screen_h = self.root.winfo_screenheight()
-        x = screen_w - self.bubble_size - self.margin
-        y = screen_h - self.bubble_size - self.margin - 40
-
         self.chat_frame.pack_forget()
         self.bubble_frame.pack(fill=tk.BOTH, expand=True)
-        self.root.geometry(f"{self.bubble_size}x{self.bubble_size}+{x}+{y}")
+        self.root.geometry(f"{self.bubble_size}x{self.bubble_size}+{self.bubble_x}+{self.bubble_y}")
         self.is_expanded = False
 
     def log(self, text, tag="system"):
         self.log_area.insert(tk.END, text, tag)
         self.log_area.see(tk.END)
 
-        # Déclencheurs de réouverture automatique si replié (inclut maintenant 🔑)
         triggers = ["🤖 l'agent a besoin d'aide", "mission accomplie", "✅", "⚠️ détection de boucle", "🔑"]
         if any(trig in text.lower() for trig in triggers):
             if not self.is_expanded:
@@ -236,7 +280,6 @@ class FloatingAssistantBubble:
         payload = {"type": "instruction", "content": text}
         try:
             self.sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
-            # Masque visuellement la clé API dans les logs si c'est une clé OpenRouter
             if text.startswith("sk-or-"):
                 self.log("👤 [Clé API envoyée et masquée]\n\n", "user")
             else:
