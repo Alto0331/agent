@@ -3,6 +3,8 @@ import subprocess
 import socket
 import json
 import threading
+import os
+import shutil
 
 # --- 0. SYSTÈME AUTO-INSTALLATEUR DE DÉPENDANCES ---
 DEPENDENCIES = {
@@ -34,8 +36,33 @@ def installer_dependances():
     else:
         print("Tous les composants sont prêts.\n")
 
-# Vérification AVANT d'importer le reste
+def verifier_et_installer_brave():
+    # Chemins standards de Brave sur Windows
+    brave_paths = [
+        os.path.expandvars(r"%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+        os.path.expandvars(r"%LocalAppData%\BraveSoftware\Brave-Browser\Application\brave.exe")
+    ]
+    
+    if any(os.path.exists(p) for p in brave_paths) or shutil.which("brave"):
+        print("Navigateur Brave déjà présent.\n")
+        return
+
+    print("Brave n'est pas installé. Début de l'installation silencieuse...")
+    try:
+        cmd = [
+            "winget", "install", "--id", "Brave.Brave",
+            "-e", "--source", "winget",
+            "--silent", "--accept-source-agreements", "--accept-package-agreements"
+        ]
+        subprocess.check_call(cmd)
+        print("Brave installé avec succès !\n")
+    except Exception as e:
+        print(f"Avertissement : installation automatique de Brave échouée ({e}).")
+
+# Vérifications et installations AVANT d'importer le reste
 installer_dependances()
+verifier_et_installer_brave()
 
 # Importation du moteur IA et du gestionnaire de clé API
 from agent_core import prepare_task_data, run_agent, load_api_key, save_api_key
@@ -131,27 +158,26 @@ def handle_client(conn, addr):
                 elif msg_type in ["instruction", "task"]:
                     content = msg.get("content", "").strip()
                     
-                    # Cas A : On attend que l'utilisateur saisisse sa clé API
+                    # Cas A : Saisie de la clé API
                     if app_instance.awaiting_api_key:
                         save_api_key(content)
                         app_instance.awaiting_api_key = False
                         app_instance.log("✅ Clé API enregistrée dans 'api_key.txt' ! Tu peux lancer tes tâches.\n", "system")
                         
-                        # Si une tâche était en attente avant la demande de clé, on la lance automatiquement
                         if app_instance.pending_task:
                             t = app_instance.pending_task
                             app_instance.pending_task = None
                             start_agent_task(t, app_instance)
                         continue
 
-                    # Cas B : Sécurité si le fichier api_key.txt a été supprimé entre-temps
+                    # Cas B : api_key.txt manquant
                     if not load_api_key():
                         app_instance.awaiting_api_key = True
                         app_instance.pending_task = content
                         app_instance.log("🔑 Clé API introuvable. Colle ta clé API OpenRouter pour lancer cette tâche :\n", "agent")
                         continue
 
-                    # Cas C : L'agent tourne déjà et attendait dans ask_human
+                    # Cas C : Attente ask_human
                     if app_instance.agent_running and not app_instance.wait_event.is_set():
                         app_instance.human_response = content
                         app_instance.wait_event.set()
