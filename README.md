@@ -1,0 +1,2 @@
+Make a vm that can run python and use an openrouter api key to use the model, the model is claude 5.5 haiku his price is 0.10/M input, and 0.50/M output. 
+There are 2 models you can find the principal model in agent_core.py if you want to change for a better one.
