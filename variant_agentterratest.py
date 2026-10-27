@@ -4,7 +4,8 @@ agentterratest.py — Moteur d'agent autonome optimisé exclusivement pour OpenA
 Compatible à 100% avec agent_server.py et app_client.py.
 
 Optimisations intégrées :
-1. Routage OpenRouter Flex (:floor + service_tier="flex") -> 0.50$/M input, 2.50$/M output, 0.025$/M cache read.
+1. Routage OpenRouter Flex (:floor + service_tier="flex") -> 0.50$/M input, 2.50$/M output, 0.025$/M cache read,
+   avec bascule automatique sur la route Standard si le délai dépasse 3 secondes.
 2. Bridage du raisonnement (reasoning effort="low", exclude=True, temperature=0.0) -> Zéro token gaspillé en bavardage.
 3. Alignement du Cache Prompt OpenAI -> Préfixe système 100% statique pour maximiser le Cache Read à 0.025$/M.
 4. Saisie Bureautique (Word, Excel, Brave) par bloc Presse-Papiers Unicode -> Orthographe, accents et mise en page intacts.
@@ -78,15 +79,15 @@ def save_api_key(api_key: str) -> bool:
 
 
 def get_openrouter_client() -> OpenAI:
-    """Initialise le client OpenAI pointant sur OpenRouter avec timeout adapté au tier Flex."""
+    """Initialise le client OpenAI pointant sur OpenRouter."""
     api_key = load_api_key()
     if not api_key:
         raise ValueError("Clé API OpenRouter manquante (api_key.txt vide ou absent).")
     return OpenAI(
         base_url=OPENROUTER_BASE_URL,
         api_key=api_key,
-        timeout=45.0,
-        max_retries=2,
+        timeout=35.0,
+        max_retries=1,
         default_headers={
             "HTTP-Referer": "https://github.com/Alto0331/agent",
             "X-Title": "VM Autonomous Agent Terra",
@@ -236,21 +237,18 @@ def capture_screen(draw_cursor: bool = True):
 
 def resolve_xy(x: float, y: float) -> tuple[int, int]:
     """
-    Convertit intelligemment les coordonnées envoyées par GPT-6.1 Terra :
-    - Si les coordonnées sont dans le repère de l'image 1280x720, les projette sur la résolution réelle.
-    - Si elles sont normalisées [0..1000], les adapte également.
+    Convertit les coordonnées envoyées par GPT-6.1 Terra depuis la grille 1280x720
+    vers la résolution réelle de la VM.
     """
     real_w, real_h = get_screen_size()
     x_val, y_val = float(x), float(y)
 
-    # Projection depuis la grille 1280x720 affichée au modèle
     scale_x = real_w / float(VISION_TARGET_WIDTH)
     scale_y = real_h / float(VISION_TARGET_HEIGHT)
 
     final_x = int(round(x_val * scale_x))
     final_y = int(round(y_val * scale_y))
 
-    # Garde-fou dans les limites de l'écran
     final_x = max(2, min(real_w - 3, final_x))
     final_y = max(2, min(real_h - 3, final_y))
     return final_x, final_y
@@ -280,9 +278,10 @@ La capture d'écran que tu reçois fait exactement {VISION_TARGET_WIDTH}x{VISION
 2. `send_cisco_cli_block` tape les commandes manuellement en Unicode pur sans aucun bug AZERTY/QWERTY et gère automatiquement `enable` et `no ip domain-lookup`.
 3. N'utilise pas `Ctrl+V` dans la CLI Cisco IOS (cela écrit `^V`). Passe toujours par `send_cisco_cli_block`.
 
-🟡 GESTION DES BLOCAGES :
+🟡 GESTION DES BLOCAGES ET FIN DE MISSION IMMÉDIATE :
 - Si une fenêtre de connexion, un CAPTCHA, un mot de passe inconnu ou une ambiguïté critique bloque la mission, appelle `ask_human`.
-- Dès que l'objectif de l'utilisateur est intégralement atteint et vérifié visuellement à l'écran, appelle `finish_task`.
+- INTERDICTION DE VÉRIFIER EN BOUCLE : Dès que tu as effectué les actions demandées par l'utilisateur (ex: épingler une application, valider un formulaire, saisir un texte), appelle IMMÉDIATEMENT `finish_task`.
+- Ne fais JAMAIS de clics supplémentaires (ni clic gauche, ni clic droit, ni double-clic) pour "vérifier" ou "contrôler" ton propre travail après coup. Fais confiance à tes actions et termine la mission dès la dernière action exécutée.
 """
 
 TOOLS_SCHEMA = [
@@ -509,7 +508,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "finish_task",
-            "description": "Termine la mission lorsque tout est accompli et vérifié à l'écran.",
+            "description": "Termine immédiatement la mission dès que les actions demandées ont été exécutées, sans faire de clics supplémentaires de vérification.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -763,25 +762,25 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
 
 
 # ==============================================================================
-# 6. APPEL API OPENROUTER TAILLE SUR MESURE POUR GPT-6.1 TERRA (FLEX)
+# 6. APPEL API OPENROUTER TAILLE SUR MESURE POUR GPT-6.1 TERRA (FLEX 3s -> STANDARD)
 # ==============================================================================
 def call_terra_model(client: OpenAI, messages: list):
     """
-    Appelle `openai/gpt-6.1-terra:floor` en privilégiant l'endpoint OpenAI Flex ($0.50/$2.50, cache $0.025)
-    et en bridant les tokens de réflexion au strict minimum.
-    En cas d'indisponibilité ponctuelle de la file Flex, bascule de manière transparente sur Terra standard.
+    Tente toujours `openai/gpt-6.1-terra:floor` (Flex) en premier avec un coupe-circuit strict à 3 secondes.
+    Si Flex dépasse 3 secondes ou est saturé, bascule immédiatement sur la route Standard sans attendre.
     """
     extra_flex = {
         "service_tier": "flex",
         "reasoning": {"effort": "low", "exclude": True},
         "provider": {
             "sort": "price",
-            "allow_fallbacks": True,
+            "allow_fallbacks": False,
         },
     }
 
     try:
-        return client.chat.completions.create(
+        # 1er essai : Route Flex avec chrono strict de 3.0s et 0 retry pour couper net en cas d'attente
+        return client.with_options(max_retries=0, timeout=3.0).chat.completions.create(
             model=TERRA_MODEL_PRIMARY,
             messages=messages,
             tools=TOOLS_SCHEMA,
@@ -791,23 +790,21 @@ def call_terra_model(client: OpenAI, messages: list):
             extra_body=extra_flex,
         )
     except Exception as first_err:
-        # Fallback instantané sur le routage standard si la file Flex rejette ou timeout
+        print(f"[Réseau] Flex > 3s ou occupé ({first_err}). Bascule immédiate sur Standard.")
         extra_fallback = {
             "reasoning": {"effort": "low", "exclude": True},
             "provider": {"allow_fallbacks": True},
         }
-        try:
-            return client.chat.completions.create(
-                model=TERRA_MODEL_FALLBACK,
-                messages=messages,
-                tools=TOOLS_SCHEMA,
-                tool_choice="auto",
-                temperature=0.0,
-                max_tokens=700,
-                extra_body=extra_fallback,
-            )
-        except Exception:
-            raise first_err
+        # 2e essai : Route Standard instantanée
+        return client.with_options(max_retries=2, timeout=35.0).chat.completions.create(
+            model=TERRA_MODEL_FALLBACK,
+            messages=messages,
+            tools=TOOLS_SCHEMA,
+            tool_choice="auto",
+            temperature=0.0,
+            max_tokens=700,
+            extra_body=extra_fallback,
+        )
 
 
 # ==============================================================================
@@ -840,7 +837,7 @@ def run_agent(task: str, app_instance=None, max_steps: int = 45):
         else:
             prep_info = prepare_task_data(task).get("hints", prep_info)
 
-    log_msg(f"🚀 Modèle actif : GPT-6.1 Terra (Flex / Floor - Raisonnement bridé)\n", "system")
+    log_msg("🚀 Modèle actif : GPT-6.1 Terra (Flex 3s -> Standard - Raisonnement bridé)\n", "system")
 
     # PRÉFIXE IMMUABLE (Messages 0 et 1) -> Permet à OpenAI de mettre en cache le prompt et les outils
     static_prefix = [
@@ -850,7 +847,7 @@ def run_agent(task: str, app_instance=None, max_steps: int = 45):
             "content": (
                 f"🎯 MISSION UTILISATEUR : {task}\n\n"
                 f"📌 CONSIGNES CONTEXTUELLES : {prep_info}\n"
-                "Exécute cette mission étape par étape à partir des captures d'écran."
+                "Exécute cette mission étape par étape à partir des captures d'écran et appelle `finish_task` dès que la dernière action est réalisée."
             ),
         },
     ]
@@ -882,7 +879,8 @@ def run_agent(task: str, app_instance=None, max_steps: int = 45):
         if unchanged_screen_count >= 3:
             loop_warning = (
                 "\n⚠️ ATTENTION : L'écran n'a pas changé après tes 3 dernières actions. "
-                "Ne répète pas le même clic ! Essaie une autre approche (ex: double-clic, `open_app_or_url`, `focus_window`, ou `ask_human`)."
+                "Si la mission demandée est déjà terminée, appelle IMMÉDIATEMENT `finish_task` sans refaire de clic. "
+                "Sinon, change d'approche (`open_app_or_url`, `focus_window`, ou `ask_human`)."
             )
             log_msg("⚠️ Détection de boucle : l'écran ne change pas, ajustement de la stratégie...\n", "error")
 
@@ -920,7 +918,7 @@ def run_agent(task: str, app_instance=None, max_steps: int = 45):
             }
         )
 
-        # 3. Appel à GPT-6.1 Terra (Flex)
+        # 3. Appel à GPT-6.1 Terra (Flex 3s -> Standard)
         try:
             response = call_terra_model(client, messages)
         except Exception as api_err:
@@ -970,7 +968,7 @@ def run_agent(task: str, app_instance=None, max_steps: int = 45):
                     if getattr(app_instance, "stop_requested", False):
                         return
                     user_reply = getattr(app_instance, "human_response", "").strip()
-                    log_msg(f"▶️ Réponse reçue, reprise de la mission.\n", "system")
+                    log_msg("▶️ Réponse reçue, reprise de la mission.\n", "system")
                     history_logs.append(f"Étape {step}: Question posée ('{question}') -> Réponse utilisateur : '{user_reply}'")
                 else:
                     return
