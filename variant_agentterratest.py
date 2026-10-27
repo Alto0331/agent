@@ -1,0 +1,995 @@
+# -*- coding: utf-8 -*-
+"""
+agentterratest.py — Moteur d'agent autonome optimisé exclusivement pour OpenAI GPT-6.1 Terra (Flex / Floor)
+Compatible à 100% avec agent_server.py et app_client.py.
+
+Optimisations intégrées :
+1. Routage OpenRouter Flex (:floor + service_tier="flex") -> 0.50$/M input, 2.50$/M output, 0.025$/M cache read.
+2. Bridage du raisonnement (reasoning effort="low", exclude=True, temperature=0.0) -> Zéro token gaspillé en bavardage.
+3. Alignement du Cache Prompt OpenAI -> Préfixe système 100% statique pour maximiser le Cache Read à 0.025$/M.
+4. Saisie Bureautique (Word, Excel, Brave) par bloc Presse-Papiers Unicode -> Orthographe, accents et mise en page intacts.
+5. Saisie Cisco Packet Tracer CLI par injection Unicode bas niveau (Win32 SendInput KEYEVENTF_UNICODE) ->
+   Frappe manuelle fluide dans l'IOS Cisco sans jamais dépendre du clavier AZERTY/QWERTY ni provoquer de ^V.
+"""
+
+import os
+import sys
+import time
+import json
+import base64
+import hashlib
+import ctypes
+import subprocess
+from io import BytesIO
+
+import mss
+from PIL import Image, ImageDraw
+import pyautogui
+import pygetwindow as gw
+import pyperclip
+from openai import OpenAI
+
+# Configuration PyAutoGUI sécurisée
+pyautogui.FAILSAFE = False
+pyautogui.PAUSE = 0.05
+
+# Fichier de stockage local de la clé API (ignoré par Git)
+API_KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api_key.txt")
+
+# --- CONFIGURATION EXCLUSIVE GPT-6.1 TERRA (FLEX / FLOOR) ---
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# Le suffixe :floor active le tri par prix le plus bas ET débloque le tier OpenAI Flex (0.50$/M in, 2.50$/M out)
+TERRA_MODEL_PRIMARY = "openai/gpt-6.1-terra:floor"
+TERRA_MODEL_FALLBACK = "openai/gpt-6.1-terra"
+
+# Résolution envoyée au modèle Vision (optimisée pour le ratio précision/tokens de GPT-6.1 Terra)
+VISION_TARGET_WIDTH = 1280
+VISION_TARGET_HEIGHT = 720
+JPEG_QUALITY = 78
+
+
+# ==============================================================================
+# 1. GESTION DE LA CLÉ API
+# ==============================================================================
+def load_api_key() -> str:
+    """Charge la clé API OpenRouter depuis api_key.txt."""
+    if os.path.exists(API_KEY_FILE):
+        try:
+            with open(API_KEY_FILE, "r", encoding="utf-8") as f:
+                key = f.read().strip()
+                if key:
+                    return key
+        except Exception:
+            pass
+    return os.environ.get("OPENROUTER_API_KEY", "").strip()
+
+
+def save_api_key(api_key: str) -> bool:
+    """Sauvegarde la clé API OpenRouter dans api_key.txt."""
+    try:
+        clean_key = api_key.strip()
+        with open(API_KEY_FILE, "w", encoding="utf-8") as f:
+            f.write(clean_key)
+        os.environ["OPENROUTER_API_KEY"] = clean_key
+        return True
+    except Exception as e:
+        print(f"[Erreur] Impossible d'enregistrer la clé API : {e}")
+        return False
+
+
+def get_openrouter_client() -> OpenAI:
+    """Initialise le client OpenAI pointant sur OpenRouter avec timeout adapté au tier Flex."""
+    api_key = load_api_key()
+    if not api_key:
+        raise ValueError("Clé API OpenRouter manquante (api_key.txt vide ou absent).")
+    return OpenAI(
+        base_url=OPENROUTER_BASE_URL,
+        api_key=api_key,
+        timeout=45.0,
+        max_retries=2,
+        default_headers={
+            "HTTP-Referer": "https://github.com/Alto0331/agent",
+            "X-Title": "VM Autonomous Agent Terra",
+        },
+    )
+
+
+# ==============================================================================
+# 2. FRAPPE BAS NIVEAU WIN32 UNICODE (ANTI-BUG AZERTY / QWERTY POUR CISCO CLI)
+# ==============================================================================
+PUL = ctypes.POINTER(ctypes.c_ulong)
+
+
+class KeyBdInput(ctypes.Structure):
+    _fields_ = [
+        ("wVk", ctypes.c_ushort),
+        ("wScan", ctypes.c_ushort),
+        ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", PUL),
+    ]
+
+
+class HardwareInput(ctypes.Structure):
+    _fields_ = [
+        ("uMsg", ctypes.c_ulong),
+        ("wParamL", ctypes.c_short),
+        ("wParamH", ctypes.c_ushort),
+    ]
+
+
+class MouseInput(ctypes.Structure):
+    _fields_ = [
+        ("dx", ctypes.c_long),
+        ("dy", ctypes.c_long),
+        ("mouseData", ctypes.c_ulong),
+        ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", PUL),
+    ]
+
+
+class Input_I(ctypes.Union):
+    _fields_ = [
+        ("ki", KeyBdInput),
+        ("mi", MouseInput),
+        ("hi", HardwareInput),
+    ]
+
+
+class Input(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_ulong),
+        ("ii", Input_I),
+    ]
+
+
+KEYEVENTF_UNICODE = 0x0004
+KEYEVENTF_KEYUP = 0x0002
+INPUT_KEYBOARD = 1
+
+
+def send_unicode_char(char: str):
+    """
+    Injecte un caractère directement en UTF-16 via l'API Win32 SendInput.
+    Avantage majeur : ignore totalement le layout AZERTY/QWERTY de Windows
+    et fonctionne comme une vraie frappe manuelle dans Cisco Packet Tracer CLI.
+    """
+    code = ord(char)
+    extra = ctypes.c_ulong(0)
+
+    ii_down = Input_I()
+    ii_down.ki = KeyBdInput(0, code, KEYEVENTF_UNICODE, 0, ctypes.pointer(extra))
+    x_down = Input(ctypes.c_ulong(INPUT_KEYBOARD), ii_down)
+
+    ii_up = Input_I()
+    ii_up.ki = KeyBdInput(0, code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0, ctypes.pointer(extra))
+    x_up = Input(ctypes.c_ulong(INPUT_KEYBOARD), ii_up)
+
+    ctypes.windll.user32.SendInput(1, ctypes.pointer(x_down), ctypes.sizeof(x_down))
+    ctypes.windll.user32.SendInput(1, ctypes.pointer(x_up), ctypes.sizeof(x_up))
+
+
+def type_unicode_string(text: str, interval: float = 0.008, app_instance=None):
+    """Frappe une chaîne caractère par caractère en Unicode pur (idéal pour Cisco IOS CLI)."""
+    for ch in text:
+        if app_instance and getattr(app_instance, "stop_requested", False):
+            break
+        if ch == "\r":
+            continue
+        elif ch == "\n":
+            pyautogui.press("enter")
+            time.sleep(0.08)
+        else:
+            send_unicode_char(ch)
+            if interval > 0:
+                time.sleep(interval)
+
+
+# ==============================================================================
+# 3. CAPTURE D'ÉCRAN & CONVERSION DE COORDONNÉES
+# ==============================================================================
+def get_screen_size():
+    """Retourne la taille réelle de l'écran principal."""
+    return pyautogui.size()
+
+
+def capture_screen(draw_cursor: bool = True):
+    """
+    Capture l'écran de la VM, dessine un repère visuel sur la position actuelle
+    de la souris pour aider GPT-6.1 Terra, et redimensionne en 1280x720.
+    Retourne (base64_jpeg, md5_hash, (real_w, real_h)).
+    """
+    with mss.mss() as sct:
+        monitor = sct.monitors[1]
+        sct_img = sct.grab(monitor)
+        img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+
+    real_w, real_h = img.size
+
+    if draw_cursor:
+        try:
+            mx, my = pyautogui.position()
+            draw = ImageDraw.Draw(img)
+            r = 10
+            draw.ellipse((mx - r, my - r, mx + r, my + r), outline="#ef4444", width=3)
+            draw.line((mx - r - 4, my, mx + r + 4, my), fill="#ef4444", width=2)
+            draw.line((mx, my - r - 4, mx, my + r + 4), fill="#ef4444", width=2)
+        except Exception:
+            pass
+
+    # Empreinte rapide pour détecter si l'écran est figé (boucle d'actions)
+    small_hash_img = img.resize((64, 36), Image.Resampling.BILINEAR)
+    screen_hash = hashlib.md5(small_hash_img.tobytes()).hexdigest()
+
+    # Redimensionnement optimal pour GPT-6.1 Terra Vision
+    if (real_w, real_h) != (VISION_TARGET_WIDTH, VISION_TARGET_HEIGHT):
+        img_resized = img.resize((VISION_TARGET_WIDTH, VISION_TARGET_HEIGHT), Image.Resampling.LANCZOS)
+    else:
+        img_resized = img
+
+    buf = BytesIO()
+    img_resized.save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+    b64_str = base64.b64encode(buf.getvalue()).decode("utf-8")
+    return b64_str, screen_hash, (real_w, real_h)
+
+
+def resolve_xy(x: float, y: float) -> tuple[int, int]:
+    """
+    Convertit intelligemment les coordonnées envoyées par GPT-6.1 Terra :
+    - Si les coordonnées sont dans le repère de l'image 1280x720, les projette sur la résolution réelle.
+    - Si elles sont normalisées [0..1000], les adapte également.
+    """
+    real_w, real_h = get_screen_size()
+    x_val, y_val = float(x), float(y)
+
+    # Projection depuis la grille 1280x720 affichée au modèle
+    scale_x = real_w / float(VISION_TARGET_WIDTH)
+    scale_y = real_h / float(VISION_TARGET_HEIGHT)
+
+    final_x = int(round(x_val * scale_x))
+    final_y = int(round(y_val * scale_y))
+
+    # Garde-fou dans les limites de l'écran
+    final_x = max(2, min(real_w - 3, final_x))
+    final_y = max(2, min(real_h - 3, final_y))
+    return final_x, final_y
+
+
+# ==============================================================================
+# 4. PRÉPARATION DE TÂCHE & PROMPTS SYSTÈME STATIQUES (CACHE-FRIENDLY)
+# ==============================================================================
+SYSTEM_PROMPT_TERRA = f"""Tu es un agent d'exécution autonome sur Windows (VM), taillé pour la vitesse et la précision.
+La capture d'écran que tu reçois fait exactement {VISION_TARGET_WIDTH}x{VISION_TARGET_HEIGHT} pixels. Toutes tes coordonnées (x, y) doivent être données dans ce repère ({VISION_TARGET_WIDTH}x{VISION_TARGET_HEIGHT}).
+
+🔴 RÈGLE D'OR DE SILENCE ET DE RENTABILITÉ :
+- Tu es un automate d'exécution directe, PAS un chatbot bavard.
+- N'écris AUCUNE phrase d'explication avant ou après tes appels d'outils.
+- Appelle directement l'outil requis. Si plusieurs actions simples sont évidentes, exécute l'action prioritaire immédiatement.
+
+🟢 QUALITÉ DU TEXTE, ORTHOGRAPHE ET MISE EN PAGE (WORD, EXCEL, BRAVE, BLOC-NOTES) :
+1. ORTHOGRAPHE FRANÇAISE IRRÉPROCHABLE : Rédige toujours avec tous les accents (é, è, ê, à, ù, ç), les apostrophes et une ponctuation soignée.
+2. INTERDICTION DU MOT-À-MOT : Ne découpe jamais un texte en plusieurs petits appels. Prépare le paragraphe, le document ou le tableau entier et envoie-le en UN SEUL appel `type_text` ou `write_clipboard`.
+3. MISE EN PAGE PROPRE :
+   - Dans Word / Bloc-notes / Mails : utilise des sauts de ligne clairs (`\n\n` entre les paragraphes, titres nets, listes structurées sans symboles Markdown bruts comme `**` ou `###` sauf si demandé).
+   - Dans Excel : pour remplir plusieurs cellules d'un coup, prépare les lignes avec des tabulations `\t` entre les colonnes et `\n` entre les lignes, puis utilise `write_clipboard(text=..., paste=True)`.
+4. NAVIGATION WEB : Privilégie toujours le navigateur Brave (`open_app_or_url` avec l'URL ou `brave`) pour éviter les pop-ups.
+
+🔵 RÈGLES SPÉCIFIQUES CISCO PACKET TRACER :
+1. Pour configurer un routeur ou un switch en ligne de commande (onglet CLI), clique d'abord dans la zone blanche/noire du terminal CLI pour lui donner le focus, puis utilise EXCLUSIVEMENT `send_cisco_cli_block`.
+2. `send_cisco_cli_block` tape les commandes manuellement en Unicode pur sans aucun bug AZERTY/QWERTY et gère automatiquement `enable` et `no ip domain-lookup`.
+3. N'utilise pas `Ctrl+V` dans la CLI Cisco IOS (cela écrit `^V`). Passe toujours par `send_cisco_cli_block`.
+
+🟡 GESTION DES BLOCAGES :
+- Si une fenêtre de connexion, un CAPTCHA, un mot de passe inconnu ou une ambiguïté critique bloque la mission, appelle `ask_human`.
+- Dès que l'objectif de l'utilisateur est intégralement atteint et vérifié visuellement à l'écran, appelle `finish_task`.
+"""
+
+TOOLS_SCHEMA = [
+    {
+        "type": "function",
+        "function": {
+            "name": "click_xy",
+            "description": f"Clique aux coordonnées (x, y) sur la grille {VISION_TARGET_WIDTH}x{VISION_TARGET_HEIGHT}.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": f"Coordonnée X (0 à {VISION_TARGET_WIDTH})"},
+                    "y": {"type": "integer", "description": f"Coordonnée Y (0 à {VISION_TARGET_HEIGHT})"},
+                    "button": {"type": "string", "enum": ["left", "right", "middle"], "default": "left"},
+                    "clicks": {"type": "integer", "default": 1, "description": "1 pour clic simple, 2 pour double-clic"},
+                },
+                "required": ["x", "y"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "double_click_xy",
+            "description": f"Double-clique aux coordonnées (x, y) sur la grille {VISION_TARGET_WIDTH}x{VISION_TARGET_HEIGHT}.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer"},
+                    "y": {"type": "integer"},
+                },
+                "required": ["x", "y"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "right_click_xy",
+            "description": f"Clic droit aux coordonnées (x, y) sur la grille {VISION_TARGET_WIDTH}x{VISION_TARGET_HEIGHT}.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer"},
+                    "y": {"type": "integer"},
+                },
+                "required": ["x", "y"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "drag_and_drop",
+            "description": "Maintient le clic gauche de (start_x, start_y) jusqu'à (end_x, end_y).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_x": {"type": "integer"},
+                    "start_y": {"type": "integer"},
+                    "end_x": {"type": "integer"},
+                    "end_y": {"type": "integer"},
+                    "duration": {"type": "number", "default": 0.5},
+                },
+                "required": ["start_x", "start_y", "end_x", "end_y"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "type_text",
+            "description": "Écrit un texte complet (mot, phrase, paragraphe entier avec accents et sauts de ligne) de manière instantanée et sans faute de frappe. Prépare tout le bloc de texte en une seule fois.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Texte complet à saisir (français soigné, accents et retours à la ligne inclus)."},
+                    "press_enter": {"type": "boolean", "default": False, "description": "Appuyer sur Entrée à la fin."},
+                    "clear_first": {"type": "boolean", "default": False, "description": "Sélectionner tout (Ctrl+A) et effacer avant d'écrire."},
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_clipboard",
+            "description": "Copie un long bloc de texte ou un tableau formaté (colonnes séparées par \t, lignes par \n pour Excel/Word) dans le presse-papiers et le colle proprement.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Contenu complet à copier/coller."},
+                    "paste": {"type": "boolean", "default": True, "description": "Effectuer Ctrl+V immédiatement."},
+                    "press_enter": {"type": "boolean", "default": False},
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_cisco_cli_block",
+            "description": "Tape manuellement un bloc de commandes IOS dans le terminal CLI de Cisco Packet Tracer (immunisé contre les bugs AZERTY/QWERTY). Sépare les commandes par des sauts de ligne \n.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "commands": {
+                        "type": "string",
+                        "description": "Commandes Cisco IOS séparées par \n (ex: 'enable\nconf t\nhostname SW1\nint fa0/1\nswitchport mode access\nno shut').",
+                    },
+                },
+                "required": ["commands"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "press_key",
+            "description": "Appuie sur une touche spéciale (enter, tab, esc, backspace, delete, space, up, down, left, right, win, f1..f12).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string"},
+                    "presses": {"type": "integer", "default": 1},
+                },
+                "required": ["key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "hotkey",
+            "description": "Exécute un raccourci clavier (ex: ['ctrl', 's'], ['ctrl', 'a'], ['ctrl', 'c'], ['alt', 'f4'], ['win', 'd']).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keys": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Liste des touches du raccourci dans l'ordre.",
+                    },
+                },
+                "required": ["keys"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scroll",
+            "description": "Fait défiler la molette de la souris (positif = haut, négatif = bas).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "amount": {"type": "integer", "description": "Ex: -500 pour descendre, 500 pour monter."},
+                    "x": {"type": "integer", "description": "Optionnel: coordonnée X où placer la souris avant de scroller."},
+                    "y": {"type": "integer", "description": "Optionnel: coordonnée Y où placer la souris avant de scroller."},
+                },
+                "required": ["amount"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_app_or_url",
+            "description": "Lance directement une application Windows (brave, notepad, calc, explorer, winword, excel, cmd) ou ouvre une URL dans Brave sans chercher l'icône sur le bureau.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "description": "Nom de l'exécutable, chemin ou URL complète (https://...)."},
+                },
+                "required": ["target"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "focus_window",
+            "description": "Met au premier plan et agrandit une fenêtre ouverte contenant ce titre (ex: 'Packet Tracer', 'Word', 'Excel', 'Brave').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title_substring": {"type": "string"},
+                },
+                "required": ["title_substring"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "wait",
+            "description": "Attend quelques secondes (utile pendant un chargement ou une installation).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "seconds": {"type": "number", "default": 2.0},
+                },
+                "required": ["seconds"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_human",
+            "description": "Demande de l'aide ou une information manquante à l'utilisateur via la bulle de chat et met l'agent en pause jusqu'à la réponse.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "Question claire et précise pour l'utilisateur."},
+                },
+                "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "finish_task",
+            "description": "Termine la mission lorsque tout est accompli et vérifié à l'écran.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string", "description": "Résumé court de ce qui a été réalisé."},
+                },
+                "required": ["summary"],
+            },
+        },
+    },
+]
+
+
+def prepare_task_data(task: str) -> dict:
+    """
+    Fonction appelée en tâche de fond par agent_server.py au lancement d'une instruction.
+    Détecte le profil de la tâche (Cisco, Excel/Word, Web) pour injecter des rappels ciblés
+    sans alourdir les appels réseau.
+    """
+    t_low = task.lower()
+    hints = []
+
+    if any(k in t_low for k in ["cisco", "packet tracer", "vlan", "routeur", "router", "switch", "ospf", "dhcp", "ping", "cli", "fa0/", "gig0/"]):
+        hints.append(
+            "MODE CISCO DÉTECTÉ : Utilise `send_cisco_cli_block` dès que la fenêtre CLI d'un équipement est ouverte et active. "
+            "Ne tente jamais de Ctrl+V dans l'IOS Cisco."
+        )
+    if any(k in t_low for k in ["excel", "tableau", "cellule", "colonne", "formule", "tableur"]):
+        hints.append(
+            "MODE EXCEL DÉTECTÉ : Clique sur la cellule de départ (ex: A1) puis utilise `write_clipboard` avec des tabulations `\t` "
+            "entre les colonnes et `\n` entre les lignes pour remplir tout le tableau d'un seul coup."
+        )
+    if any(k in t_low for k in ["word", "document", "lettre", "rapport", "rédige", "redige", "texte", "paragraphe", "bloc-notes", "notepad"]):
+        hints.append(
+            "MODE RÉDACTION DÉTECTÉ : Soigne l'orthographe française, les accents et la ponctuation. "
+            "Envoie le texte complet en un seul appel `type_text` (avec `\n\n` pour aérer les paragraphes)."
+        )
+
+    return {
+        "task": task,
+        "hints": "\n".join(hints) if hints else "Exécution standard directe.",
+        "timestamp": time.time(),
+    }
+
+
+# ==============================================================================
+# 5. EXÉCUTEUR D'ACTIONS (ROBUSTE & IMMUNISÉ AZERTY/QWERTY)
+# ==============================================================================
+def _find_brave_exe() -> str | None:
+    brave_paths = [
+        os.path.expandvars(r"%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+        os.path.expandvars(r"%LocalAppData%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+    ]
+    for p in brave_paths:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def execute_action(name: str, args: dict, app_instance=None) -> str:
+    """Exécute l'outil demandé par GPT-6.1 Terra et retourne un statut concis."""
+    if app_instance and getattr(app_instance, "stop_requested", False):
+        return "Interrompu par l'utilisateur."
+
+    try:
+        if name == "click_xy":
+            rx, ry = resolve_xy(args["x"], args["y"])
+            btn = args.get("button", "left")
+            clicks = int(args.get("clicks", 1))
+            pyautogui.click(rx, ry, clicks=clicks, interval=0.08, button=btn)
+            time.sleep(0.25)
+            return f"Clic ({btn} x{clicks}) effectué en ({rx}, {ry})."
+
+        elif name == "double_click_xy":
+            rx, ry = resolve_xy(args["x"], args["y"])
+            pyautogui.doubleClick(rx, ry, interval=0.08)
+            time.sleep(0.35)
+            return f"Double-clic effectué en ({rx}, {ry})."
+
+        elif name == "right_click_xy":
+            rx, ry = resolve_xy(args["x"], args["y"])
+            pyautogui.rightClick(rx, ry)
+            time.sleep(0.25)
+            return f"Clic droit effectué en ({rx}, {ry})."
+
+        elif name == "drag_and_drop":
+            sx, sy = resolve_xy(args["start_x"], args["start_y"])
+            ex, ey = resolve_xy(args["end_x"], args["end_y"])
+            dur = max(0.2, float(args.get("duration", 0.5)))
+            pyautogui.moveTo(sx, sy, duration=0.1)
+            pyautogui.dragTo(ex, ey, duration=dur, button="left")
+            time.sleep(0.25)
+            return f"Glisser-déposer de ({sx}, {sy}) vers ({ex}, {ey}) terminé."
+
+        elif name == "type_text":
+            text = str(args.get("text", ""))
+            if not text:
+                return "Aucun texte à saisir."
+
+            if args.get("clear_first", False):
+                pyautogui.hotkey("ctrl", "a")
+                time.sleep(0.05)
+                pyautogui.press("backspace")
+                time.sleep(0.05)
+
+            # Normalisation des sauts de ligne Windows pour que Word/Bloc-notes respectent la mise en page
+            normalized_text = text.replace("\r\n", "\n").replace("\n", "\r\n")
+            pyperclip.copy(normalized_text)
+            time.sleep(0.05)
+            pyautogui.hotkey("ctrl", "v")
+            time.sleep(0.12)
+
+            if args.get("press_enter", False):
+                pyautogui.press("enter")
+                time.sleep(0.1)
+
+            return f"Texte saisi en bloc avec succès ({len(text)} caractères, orthographe et mise en page préservées)."
+
+        elif name == "write_clipboard":
+            text = str(args.get("text", ""))
+            normalized_text = text.replace("\r\n", "\n").replace("\n", "\r\n")
+            pyperclip.copy(normalized_text)
+            time.sleep(0.05)
+            if args.get("paste", True):
+                pyautogui.hotkey("ctrl", "v")
+                time.sleep(0.15)
+            if args.get("press_enter", False):
+                pyautogui.press("enter")
+                time.sleep(0.1)
+            return f"Contenu copié/collé via presse-papiers ({len(text)} caractères)."
+
+        elif name == "send_cisco_cli_block":
+            commands_raw = str(args.get("commands", ""))
+            lines = [line.strip() for line in commands_raw.splitlines() if line.strip()]
+            if not lines:
+                return "Aucune commande Cisco à envoyer."
+
+            old_pause = pyautogui.PAUSE
+            pyautogui.PAUSE = 0
+            try:
+                # Cas du dialogue initial "Would you like to enter the initial configuration dialog? [yes/no]:"
+                if len(lines) == 1 and lines[0].lower() in ["no", "n"]:
+                    type_unicode_string("no", interval=0.015, app_instance=app_instance)
+                    pyautogui.press("enter")
+                    time.sleep(0.45)
+                    pyautogui.press("enter")
+                    return "Réponse 'no' envoyée au prompt initial Cisco."
+
+                # Réveil doux du terminal IOS
+                pyautogui.press("enter")
+                time.sleep(0.2)
+
+                config_markers = {"configure terminal", "conf t", "conf terminal"}
+                has_config_mode = any(l.lower() in config_markers for l in lines)
+
+                if has_config_mode and lines[0].lower() not in {"enable", "en"}:
+                    lines.insert(0, "enable")
+
+                if has_config_mode and not any("no ip domain-lookup" in l.lower() for l in lines):
+                    for idx, l in enumerate(lines):
+                        if l.lower() in config_markers:
+                            lines.insert(idx + 1, "no ip domain-lookup")
+                            break
+
+                for line in lines:
+                    if app_instance and getattr(app_instance, "stop_requested", False):
+                        return "Interrompu par l'utilisateur pendant la frappe Cisco."
+                    # Frappe manuelle en Unicode Win32 : fonctionne nativement dans Cisco CLI sans bug AZERTY/QWERTY
+                    type_unicode_string(line, interval=0.008, app_instance=app_instance)
+                    time.sleep(0.03)
+                    pyautogui.press("enter")
+                    time.sleep(0.22)
+            finally:
+                pyautogui.PAUSE = old_pause
+
+            return f"{len(lines)} commande(s) Cisco IOS tapée(s) avec succès."
+
+        elif name == "press_key":
+            key = str(args.get("key", "enter")).lower()
+            presses = int(args.get("presses", 1))
+            pyautogui.press(key, presses=presses, interval=0.06)
+            time.sleep(0.15)
+            return f"Touche '{key}' pressée ({presses}x)."
+
+        elif name == "hotkey":
+            keys = [str(k).lower() for k in args.get("keys", [])]
+            if keys:
+                pyautogui.hotkey(*keys)
+                time.sleep(0.2)
+            return f"Raccourci {'+'.join(keys)} exécuté."
+
+        elif name == "scroll":
+            amount = int(args.get("amount", -500))
+            if "x" in args and "y" in args and args["x"] is not None and args["y"] is not None:
+                rx, ry = resolve_xy(args["x"], args["y"])
+                pyautogui.moveTo(rx, ry, duration=0.1)
+            pyautogui.scroll(amount)
+            time.sleep(0.25)
+            return f"Défilement vertical ({amount}) effectué."
+
+        elif name == "open_app_or_url":
+            target = str(args.get("target", "")).strip()
+            brave_exe = _find_brave_exe()
+
+            if target.lower().startswith(("http://", "https://", "www.")):
+                url = target if target.lower().startswith("http") else f"https://{target}"
+                if brave_exe:
+                    subprocess.Popen([brave_exe, url])
+                else:
+                    os.startfile(url)
+                time.sleep(1.5)
+                return f"URL ouverte dans le navigateur : {url}"
+
+            if target.lower() in ["brave", "brave.exe", "browser", "navigateur"] and brave_exe:
+                subprocess.Popen([brave_exe])
+                time.sleep(1.2)
+                return "Navigateur Brave lancé."
+
+            try:
+                subprocess.Popen(target, shell=True)
+            except Exception:
+                os.startfile(target)
+            time.sleep(1.2)
+            return f"Application ou cible '{target}' lancée."
+
+        elif name == "focus_window":
+            sub = str(args.get("title_substring", "")).lower().strip()
+            wins = [w for w in gw.getAllWindows() if w.title and sub in w.title.lower()]
+            if not wins:
+                return f"Aucune fenêtre trouvée contenant '{sub}'."
+            w = wins[0]
+            try:
+                if w.isMinimized:
+                    w.restore()
+                w.activate()
+                time.sleep(0.3)
+            except Exception:
+                pass
+            return f"Fenêtre '{w.title}' mise au premier plan."
+
+        elif name == "wait":
+            secs = min(15.0, max(0.2, float(args.get("seconds", 2.0))))
+            time.sleep(secs)
+            return f"Attente de {secs:.1f}s terminée."
+
+        else:
+            return f"Outil inconnu : {name}"
+
+    except Exception as e:
+        return f"Erreur lors de l'exécution de {name} : {e}"
+
+
+# ==============================================================================
+# 6. APPEL API OPENROUTER TAILLE SUR MESURE POUR GPT-6.1 TERRA (FLEX)
+# ==============================================================================
+def call_terra_model(client: OpenAI, messages: list):
+    """
+    Appelle `openai/gpt-6.1-terra:floor` en privilégiant l'endpoint OpenAI Flex ($0.50/$2.50, cache $0.025)
+    et en bridant les tokens de réflexion au strict minimum.
+    En cas d'indisponibilité ponctuelle de la file Flex, bascule de manière transparente sur Terra standard.
+    """
+    extra_flex = {
+        "service_tier": "flex",
+        "reasoning": {"effort": "low", "exclude": True},
+        "provider": {
+            "sort": "price",
+            "allow_fallbacks": True,
+        },
+    }
+
+    try:
+        return client.chat.completions.create(
+            model=TERRA_MODEL_PRIMARY,
+            messages=messages,
+            tools=TOOLS_SCHEMA,
+            tool_choice="auto",
+            temperature=0.0,
+            max_tokens=700,
+            extra_body=extra_flex,
+        )
+    except Exception as first_err:
+        # Fallback instantané sur le routage standard si la file Flex rejette ou timeout
+        extra_fallback = {
+            "reasoning": {"effort": "low", "exclude": True},
+            "provider": {"allow_fallbacks": True},
+        }
+        try:
+            return client.chat.completions.create(
+                model=TERRA_MODEL_FALLBACK,
+                messages=messages,
+                tools=TOOLS_SCHEMA,
+                tool_choice="auto",
+                temperature=0.0,
+                max_tokens=700,
+                extra_body=extra_fallback,
+            )
+        except Exception:
+            raise first_err
+
+
+# ==============================================================================
+# 7. BOUCLE PRINCIPALE DE L'AGENT (run_agent)
+# ==============================================================================
+def run_agent(task: str, app_instance=None, max_steps: int = 45):
+    """
+    Boucle principale appelée par agent_server.py.
+    Conserve un préfixe de messages 100% statique pour activer le Cache Read d'OpenAI ($0.025/M)
+    et ne garde que les 2 dernières captures d'écran en mémoire vive.
+    """
+    def log_msg(txt: str, tag: str = "system"):
+        if app_instance and hasattr(app_instance, "log"):
+            app_instance.log(txt, tag)
+        else:
+            print(txt, end="")
+
+    try:
+        client = get_openrouter_client()
+    except Exception as e:
+        log_msg(f"❌ {e}\n", "error")
+        return
+
+    # Récupération des indices préparés par prepare_task_data
+    prep_info = "Exécution directe."
+    if app_instance and hasattr(app_instance, "shared_state"):
+        state = app_instance.shared_state
+        if state.get("done") and state.get("data"):
+            prep_info = state["data"].get("hints", prep_info)
+        else:
+            prep_info = prepare_task_data(task).get("hints", prep_info)
+
+    log_msg(f"🚀 Modèle actif : GPT-6.1 Terra (Flex / Floor - Raisonnement bridé)\n", "system")
+
+    # PRÉFIXE IMMUABLE (Messages 0 et 1) -> Permet à OpenAI de mettre en cache le prompt et les outils
+    static_prefix = [
+        {"role": "system", "content": SYSTEM_PROMPT_TERRA},
+        {
+            "role": "user",
+            "content": (
+                f"🎯 MISSION UTILISATEUR : {task}\n\n"
+                f"📌 CONSIGNES CONTEXTUELLES : {prep_info}\n"
+                "Exécute cette mission étape par étape à partir des captures d'écran."
+            ),
+        },
+    ]
+
+    # Historique léger des étapes passées (texte uniquement pour économiser les tokens d'entrée)
+    history_logs: list[str] = []
+    # Conservation des 2 dernières captures maximum [(step_num, b64_img, action_summary)]
+    recent_frames: list[dict] = []
+
+    unchanged_screen_count = 0
+    last_screen_hash = None
+
+    for step in range(1, max_steps + 1):
+        if app_instance and getattr(app_instance, "stop_requested", False):
+            log_msg("🛑 Mission interrompue par l'utilisateur.\n", "error")
+            return
+
+        # 1. Capture de l'écran actuel
+        b64_img, current_hash, _ = capture_screen(draw_cursor=True)
+
+        if last_screen_hash and current_hash == last_screen_hash:
+            unchanged_screen_count += 1
+        else:
+            unchanged_screen_count = 0
+        last_screen_hash = current_hash
+
+        # Alerte anti-boucle si l'écran n'a pas bougé depuis 3 actions
+        loop_warning = ""
+        if unchanged_screen_count >= 3:
+            loop_warning = (
+                "\n⚠️ ATTENTION : L'écran n'a pas changé après tes 3 dernières actions. "
+                "Ne répète pas le même clic ! Essaie une autre approche (ex: double-clic, `open_app_or_url`, `focus_window`, ou `ask_human`)."
+            )
+            log_msg("⚠️ Détection de boucle : l'écran ne change pas, ajustement de la stratégie...\n", "error")
+
+        # 2. Construction des messages avec préfixe statique (Cache Hit maximal)
+        messages = list(static_prefix)
+
+        if history_logs:
+            compact_history = "Historique des actions déjà effectuées :\n" + "\n".join(history_logs[-12:])
+            messages.append({"role": "assistant", "content": compact_history})
+
+        # Ajout de la capture précédente (si disponible) pour donner le contexte visuel N-1
+        if recent_frames:
+            prev = recent_frames[-1]
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"Capture précédente (Étape {prev['step']}) après : {prev['summary']}"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{prev['b64']}", "detail": "low"}},
+                    ],
+                }
+            )
+
+        # Ajout de la capture courante en haute précision
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Capture actuelle (Étape {step}/{max_steps}). Quelle est ta prochaine action ?{loop_warning}",
+                    },
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}", "detail": "high"}},
+                ],
+            }
+        )
+
+        # 3. Appel à GPT-6.1 Terra (Flex)
+        try:
+            response = call_terra_model(client, messages)
+        except Exception as api_err:
+            log_msg(f"❌ Erreur API OpenRouter : {api_err}\n", "error")
+            time.sleep(2.0)
+            continue
+
+        if app_instance and getattr(app_instance, "stop_requested", False):
+            log_msg("🛑 Mission interrompue.\n", "error")
+            return
+
+        msg = response.choices[0].message
+        tool_calls = getattr(msg, "tool_calls", None)
+
+        # Si le modèle répond sans appeler d'outil
+        if not tool_calls:
+            text_reply = (msg.content or "").strip()
+            if text_reply:
+                log_msg(f"🤖 {text_reply}\n", "agent")
+                history_logs.append(f"Étape {step}: Note -> {text_reply[:120]}")
+            continue
+
+        # 4. Exécution des outils appelés par GPT-6.1 Terra
+        step_summaries = []
+        for tc in tool_calls:
+            if app_instance and getattr(app_instance, "stop_requested", False):
+                return
+
+            fn_name = tc.function.name
+            try:
+                fn_args = json.loads(tc.function.arguments or "{}")
+            except Exception:
+                fn_args = {}
+
+            # Cas 1 : Fin de mission
+            if fn_name == "finish_task":
+                summary = fn_args.get("summary", "Tâche terminée avec succès.")
+                log_msg(f"✅ Mission accomplie : {summary}\n", "system")
+                return
+
+            # Cas 2 : Demande d'aide à l'humain
+            if fn_name == "ask_human":
+                question = fn_args.get("question", "J'ai besoin d'une indication pour continuer.")
+                log_msg(f"🤖 L'agent a besoin d'aide : {question}\n", "agent")
+                if app_instance and hasattr(app_instance, "wait_for_human"):
+                    app_instance.wait_for_human()
+                    if getattr(app_instance, "stop_requested", False):
+                        return
+                    user_reply = getattr(app_instance, "human_response", "").strip()
+                    log_msg(f"▶️ Réponse reçue, reprise de la mission.\n", "system")
+                    history_logs.append(f"Étape {step}: Question posée ('{question}') -> Réponse utilisateur : '{user_reply}'")
+                else:
+                    return
+                continue
+
+            # Cas 3 : Action système / GUI / CLI
+            log_msg(f"⚡ [{step}] {fn_name}({json.dumps(fn_args, ensure_ascii=False)[:90]})\n", "agent")
+            result_str = execute_action(fn_name, fn_args, app_instance=app_instance)
+            step_summaries.append(f"{fn_name} -> {result_str}")
+            history_logs.append(f"Étape {step}: {fn_name}({json.dumps(fn_args, ensure_ascii=False)[:80]}) => {result_str}")
+
+        recent_frames.append(
+            {
+                "step": step,
+                "b64": b64_img,
+                "summary": " | ".join(step_summaries) if step_summaries else "Observation",
+            }
+        )
+        if len(recent_frames) > 2:
+            recent_frames.pop(0)
+
+    log_msg("⚠️ Nombre maximal d'étapes atteint. Arrêt de sécurité.\n", "error")
