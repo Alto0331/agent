@@ -30,9 +30,9 @@ import pygetwindow as gw
 import pyperclip
 from openai import OpenAI
 
-# Configuration PyAutoGUI sécurisée
+# Configuration PyAutoGUI sécurisée et réactive
 pyautogui.FAILSAFE = False
-pyautogui.PAUSE = 0.05
+pyautogui.PAUSE = 0.02
 
 # Fichier de stockage local de la clé API (ignoré par Git)
 API_KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api_key.txt")
@@ -171,7 +171,7 @@ def send_unicode_char(char: str):
     ctypes.windll.user32.SendInput(1, ctypes.pointer(x_up), ctypes.sizeof(x_up))
 
 
-def type_unicode_string(text: str, interval: float = 0.008, app_instance=None):
+def type_unicode_string(text: str, interval: float = 0.005, app_instance=None):
     """Frappe une chaîne caractère par caractère en Unicode pur (idéal pour Cisco IOS CLI)."""
     for ch in text:
         if app_instance and getattr(app_instance, "stop_requested", False):
@@ -180,7 +180,7 @@ def type_unicode_string(text: str, interval: float = 0.008, app_instance=None):
             continue
         elif ch == "\n":
             pyautogui.press("enter")
-            time.sleep(0.08)
+            time.sleep(0.05)
         else:
             send_unicode_char(ch)
             if interval > 0:
@@ -264,6 +264,7 @@ La capture d'écran que tu reçois fait exactement {VISION_TARGET_WIDTH}x{VISION
 - Tu es un automate d'exécution directe, PAS un chatbot bavard.
 - N'écris AUCUNE phrase d'explication avant ou après tes appels d'outils.
 - Appelle directement l'outil requis. Si plusieurs actions simples sont évidentes, exécute l'action prioritaire immédiatement.
+- Si une page web ou une application charge, n'attends jamais plus de 3 secondes (`wait` avec `seconds: 3`).
 
 🟢 QUALITÉ DU TEXTE, ORTHOGRAPHE ET MISE EN PAGE (WORD, EXCEL, BRAVE, BLOC-NOTES) :
 1. ORTHOGRAPHE FRANÇAISE IRRÉPROCHABLE : Rédige toujours avec tous les accents (é, è, ê, à, ù, ç), les apostrophes et une ponctuation soignée.
@@ -344,7 +345,7 @@ TOOLS_SCHEMA = [
                     "start_y": {"type": "integer"},
                     "end_x": {"type": "integer"},
                     "end_y": {"type": "integer"},
-                    "duration": {"type": "number", "default": 0.5},
+                    "duration": {"type": "number", "default": 0.4},
                 },
                 "required": ["start_x", "start_y", "end_x", "end_y"],
             },
@@ -480,11 +481,11 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "wait",
-            "description": "Attend quelques secondes (utile pendant un chargement ou une installation).",
+            "description": "Attend pendant un chargement de page ou d'application (3 secondes maximum).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "seconds": {"type": "number", "default": 2.0},
+                    "seconds": {"type": "number", "default": 3.0, "description": "Durée en secondes (max 3s)."},
                 },
                 "required": ["seconds"],
             },
@@ -554,7 +555,7 @@ def prepare_task_data(task: str) -> dict:
 
 
 # ==============================================================================
-# 5. EXÉCUTEUR D'ACTIONS (ROBUSTE & IMMUNISÉ AZERTY/QWERTY)
+# 5. EXÉCUTEUR D'ACTIONS (FLUIDE, ROBUSTE & IMMUNISÉ AZERTY/QWERTY)
 # ==============================================================================
 def _find_brave_exe() -> str | None:
     brave_paths = [
@@ -569,7 +570,7 @@ def _find_brave_exe() -> str | None:
 
 
 def execute_action(name: str, args: dict, app_instance=None) -> str:
-    """Exécute l'outil demandé par GPT-6.1 Terra et retourne un statut concis."""
+    """Exécute l'outil demandé par GPT-6.1 Terra avec mouvement de souris fluide et délais optimisés."""
     if app_instance and getattr(app_instance, "stop_requested", False):
         return "Interrompu par l'utilisateur."
 
@@ -578,29 +579,32 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
             rx, ry = resolve_xy(args["x"], args["y"])
             btn = args.get("button", "left")
             clicks = int(args.get("clicks", 1))
-            pyautogui.click(rx, ry, clicks=clicks, interval=0.08, button=btn)
-            time.sleep(0.25)
+            pyautogui.moveTo(rx, ry, duration=0.22, tween=pyautogui.easeOutQuad)
+            pyautogui.click(rx, ry, clicks=clicks, interval=0.06, button=btn)
+            time.sleep(0.12)
             return f"Clic ({btn} x{clicks}) effectué en ({rx}, {ry})."
 
         elif name == "double_click_xy":
             rx, ry = resolve_xy(args["x"], args["y"])
-            pyautogui.doubleClick(rx, ry, interval=0.08)
-            time.sleep(0.35)
+            pyautogui.moveTo(rx, ry, duration=0.22, tween=pyautogui.easeOutQuad)
+            pyautogui.doubleClick(rx, ry, interval=0.06)
+            time.sleep(0.2)
             return f"Double-clic effectué en ({rx}, {ry})."
 
         elif name == "right_click_xy":
             rx, ry = resolve_xy(args["x"], args["y"])
+            pyautogui.moveTo(rx, ry, duration=0.22, tween=pyautogui.easeOutQuad)
             pyautogui.rightClick(rx, ry)
-            time.sleep(0.25)
+            time.sleep(0.15)
             return f"Clic droit effectué en ({rx}, {ry})."
 
         elif name == "drag_and_drop":
             sx, sy = resolve_xy(args["start_x"], args["start_y"])
             ex, ey = resolve_xy(args["end_x"], args["end_y"])
-            dur = max(0.2, float(args.get("duration", 0.5)))
-            pyautogui.moveTo(sx, sy, duration=0.1)
-            pyautogui.dragTo(ex, ey, duration=dur, button="left")
-            time.sleep(0.25)
+            dur = max(0.25, float(args.get("duration", 0.4)))
+            pyautogui.moveTo(sx, sy, duration=0.2, tween=pyautogui.easeOutQuad)
+            pyautogui.dragTo(ex, ey, duration=dur, button="left", tween=pyautogui.easeInOutQuad)
+            time.sleep(0.15)
             return f"Glisser-déposer de ({sx}, {sy}) vers ({ex}, {ey}) terminé."
 
         elif name == "type_text":
@@ -610,20 +614,20 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
 
             if args.get("clear_first", False):
                 pyautogui.hotkey("ctrl", "a")
-                time.sleep(0.05)
+                time.sleep(0.03)
                 pyautogui.press("backspace")
-                time.sleep(0.05)
+                time.sleep(0.03)
 
             # Normalisation des sauts de ligne Windows pour que Word/Bloc-notes respectent la mise en page
             normalized_text = text.replace("\r\n", "\n").replace("\n", "\r\n")
             pyperclip.copy(normalized_text)
-            time.sleep(0.05)
+            time.sleep(0.03)
             pyautogui.hotkey("ctrl", "v")
-            time.sleep(0.12)
+            time.sleep(0.08)
 
             if args.get("press_enter", False):
                 pyautogui.press("enter")
-                time.sleep(0.1)
+                time.sleep(0.06)
 
             return f"Texte saisi en bloc avec succès ({len(text)} caractères, orthographe et mise en page préservées)."
 
@@ -631,13 +635,13 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
             text = str(args.get("text", ""))
             normalized_text = text.replace("\r\n", "\n").replace("\n", "\r\n")
             pyperclip.copy(normalized_text)
-            time.sleep(0.05)
+            time.sleep(0.03)
             if args.get("paste", True):
                 pyautogui.hotkey("ctrl", "v")
-                time.sleep(0.15)
+                time.sleep(0.1)
             if args.get("press_enter", False):
                 pyautogui.press("enter")
-                time.sleep(0.1)
+                time.sleep(0.06)
             return f"Contenu copié/collé via presse-papiers ({len(text)} caractères)."
 
         elif name == "send_cisco_cli_block":
@@ -651,15 +655,15 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
             try:
                 # Cas du dialogue initial "Would you like to enter the initial configuration dialog? [yes/no]:"
                 if len(lines) == 1 and lines[0].lower() in ["no", "n"]:
-                    type_unicode_string("no", interval=0.015, app_instance=app_instance)
+                    type_unicode_string("no", interval=0.01, app_instance=app_instance)
                     pyautogui.press("enter")
-                    time.sleep(0.45)
+                    time.sleep(0.3)
                     pyautogui.press("enter")
                     return "Réponse 'no' envoyée au prompt initial Cisco."
 
                 # Réveil doux du terminal IOS
                 pyautogui.press("enter")
-                time.sleep(0.2)
+                time.sleep(0.12)
 
                 config_markers = {"configure terminal", "conf t", "conf terminal"}
                 has_config_mode = any(l.lower() in config_markers for l in lines)
@@ -677,10 +681,10 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
                     if app_instance and getattr(app_instance, "stop_requested", False):
                         return "Interrompu par l'utilisateur pendant la frappe Cisco."
                     # Frappe manuelle en Unicode Win32 : fonctionne nativement dans Cisco CLI sans bug AZERTY/QWERTY
-                    type_unicode_string(line, interval=0.008, app_instance=app_instance)
-                    time.sleep(0.03)
+                    type_unicode_string(line, interval=0.005, app_instance=app_instance)
+                    time.sleep(0.02)
                     pyautogui.press("enter")
-                    time.sleep(0.22)
+                    time.sleep(0.15)
             finally:
                 pyautogui.PAUSE = old_pause
 
@@ -689,24 +693,24 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
         elif name == "press_key":
             key = str(args.get("key", "enter")).lower()
             presses = int(args.get("presses", 1))
-            pyautogui.press(key, presses=presses, interval=0.06)
-            time.sleep(0.15)
+            pyautogui.press(key, presses=presses, interval=0.04)
+            time.sleep(0.1)
             return f"Touche '{key}' pressée ({presses}x)."
 
         elif name == "hotkey":
             keys = [str(k).lower() for k in args.get("keys", [])]
             if keys:
                 pyautogui.hotkey(*keys)
-                time.sleep(0.2)
+                time.sleep(0.12)
             return f"Raccourci {'+'.join(keys)} exécuté."
 
         elif name == "scroll":
             amount = int(args.get("amount", -500))
             if "x" in args and "y" in args and args["x"] is not None and args["y"] is not None:
                 rx, ry = resolve_xy(args["x"], args["y"])
-                pyautogui.moveTo(rx, ry, duration=0.1)
+                pyautogui.moveTo(rx, ry, duration=0.18, tween=pyautogui.easeOutQuad)
             pyautogui.scroll(amount)
-            time.sleep(0.25)
+            time.sleep(0.15)
             return f"Défilement vertical ({amount}) effectué."
 
         elif name == "open_app_or_url":
@@ -719,19 +723,19 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
                     subprocess.Popen([brave_exe, url])
                 else:
                     os.startfile(url)
-                time.sleep(1.5)
+                time.sleep(1.0)
                 return f"URL ouverte dans le navigateur : {url}"
 
             if target.lower() in ["brave", "brave.exe", "browser", "navigateur"] and brave_exe:
                 subprocess.Popen([brave_exe])
-                time.sleep(1.2)
+                time.sleep(0.9)
                 return "Navigateur Brave lancé."
 
             try:
                 subprocess.Popen(target, shell=True)
             except Exception:
                 os.startfile(target)
-            time.sleep(1.2)
+            time.sleep(0.9)
             return f"Application ou cible '{target}' lancée."
 
         elif name == "focus_window":
@@ -744,13 +748,14 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
                 if w.isMinimized:
                     w.restore()
                 w.activate()
-                time.sleep(0.3)
+                time.sleep(0.2)
             except Exception:
                 pass
             return f"Fenêtre '{w.title}' mise au premier plan."
 
         elif name == "wait":
-            secs = min(15.0, max(0.2, float(args.get("seconds", 2.0))))
+            # Plafonne l'attente de chargement à 3.0 secondes maximum pour garder un rythme fluide
+            secs = min(3.0, max(0.2, float(args.get("seconds", 3.0))))
             time.sleep(secs)
             return f"Attente de {secs:.1f}s terminée."
 
@@ -923,7 +928,7 @@ def run_agent(task: str, app_instance=None, max_steps: int = 45):
             response = call_terra_model(client, messages)
         except Exception as api_err:
             log_msg(f"❌ Erreur API OpenRouter : {api_err}\n", "error")
-            time.sleep(2.0)
+            time.sleep(1.5)
             continue
 
         if app_instance and getattr(app_instance, "stop_requested", False):
