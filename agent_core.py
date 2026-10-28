@@ -1,871 +1,875 @@
-import base64
-import ctypes
-import io
-import json
+# -*- coding: utf-8 -*-
+"""
+agent_core.py — Moteur d'agent autonome MODE LITE (Claude Haiku 5.5)
+Idéal pour le tri de dossiers, la configuration Cisco Packet Tracer et les tâches rapides à coût minimal.
+Compatible à 100% avec agent_server.py et app_client.py.
+"""
+
 import os
-import random
+import sys
 import time
+import json
+import base64
+import hashlib
+import ctypes
+import subprocess
+from io import BytesIO
+
 import mss
-from PIL import Image
-from openai import OpenAI
+from PIL import Image, ImageDraw
 import pyautogui
 import pygetwindow as gw
 import pyperclip
-import re
+from openai import OpenAI
 
-# 1. Correction du bug multi-écrans : Coordonnées physiques réelles (DPI Aware)
+# PyMuPDF (fitz)
 try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)
-except Exception:
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except Exception:
-        pass
+    import fitz
+except ImportError:
+    fitz = None
 
-# Arrêt d'urgence : curseur tout en haut à gauche
-pyautogui.FAILSAFE = True
+# Configuration PyAutoGUI
+pyautogui.FAILSAFE = False
+pyautogui.PAUSE = 0.02
 
-# Gestionnaire multi-écrans
-sct = mss.mss()
-CURRENT_MONITOR = 1  # 1 = Écran principal, 2 = Deuxième écran
-
-# --- GESTION DYNAMIQUE DE LA CLÉ API (SANS CLÉ PRÉ-ENREGISTRÉE) ---
+# Fichier de stockage local de la clé API
 API_KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api_key.txt")
-client = None
 
-def load_api_key():
-    """Lit la clé API depuis le fichier texte si elle existe."""
+# --- CONFIGURATION DU MODÈLE LITE (CLAUDE HAIKU 5.5 SUR OPENROUTER) ---
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+MODEL_LITE = "anthropic/claude-haiku-5.5"
+
+VISION_TARGET_WIDTH = 1280
+VISION_TARGET_HEIGHT = 720
+JPEG_QUALITY = 78
+
+
+# ==============================================================================
+# 1. GESTION DE LA CLÉ API
+# ==============================================================================
+def load_api_key() -> str:
     if os.path.exists(API_KEY_FILE):
         try:
             with open(API_KEY_FILE, "r", encoding="utf-8") as f:
                 key = f.read().strip()
                 if key:
                     return key
-        except Exception as e:
-            print(f"[Erreur] Lecture de api_key.txt impossible : {e}")
-    return None
+        except Exception:
+            pass
+    return os.environ.get("OPENROUTER_API_KEY", "").strip()
 
-def save_api_key(key):
-    """Enregistre la clé API dans api_key.txt et initialise le client."""
-    clean_key = key.strip()
-    with open(API_KEY_FILE, "w", encoding="utf-8") as f:
-        f.write(clean_key)
-    init_openai_client(clean_key)
-    return clean_key
 
-def init_openai_client(api_key=None):
-    """Initialise le client OpenRouter avec la clé fournie ou sauvegardée."""
-    global client
-    if not api_key:
-        api_key = load_api_key()
-    if not api_key:
-        client = None
-        return None
-    client = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
-        default_headers={
-            "HTTP-Referer": "https://localhost",
-            "X-Title": "Agent_Local_Windows"
-        }
-    )
-    return client
-
-# Initialisation au chargement si le fichier existe déjà
-init_openai_client()
-# ------------------------------------------------------------------
-
-def prepare_task_data(task):
-    if client is None and init_openai_client() is None:
-        return None
-
-    network_keywords = ["cisco", "routeur", "switch", "vlan", "ip", "interface", "packet tracer", "réseau", "ping"]
-    is_network_task = any(kw in task.lower() for kw in network_keywords)
-    
-    if is_network_task:
-        print("[Arrière-plan] Préparation (Mode Expert Cisco) en cours...")
-        sys_content = (
-            "Tu es un assistant de préparation de données et un expert certifié Cisco CCNA / BTS SIO SISR. "
-            "Analyse la tâche de l'utilisateur et renvoie UNIQUEMENT un objet JSON valide "
-            "contenant les textes exacts qui devront être tapés, collés ou cherchés. "
-            "SPÉCIALITÉ CISCO : Si la tâche implique de configurer un routeur ou un switch Cisco (VLAN, trunk, "
-            "router-on-a-stick dot1Q, DHCP, port-security, routage, etc.), "
-            "génère les blocs complets de commandes Cisco IOS exactes, séparées par '\\n', en commençant par "
-            "'enable\\nconfigure terminal' et en terminant par 'end\\nwrite memory'. "
-            "Si la tâche ne nécessite aucun texte ou script à rédiger, renvoie {}. "
-            "N'ajoute aucun texte avant ou après le JSON. "
-            "Exemple : {\"config_switch0\": \"enable\\nconfigure terminal\\nvlan 10\\nname Commercial\\nexit\\nend\\nwrite memory\"}"
-        )
-    else:
-        print("[Arrière-plan] Préparation (Mode Basique) en cours...")
-        sys_content = (
-            "Tu es un assistant de préparation de données. "
-            "Analyse la tâche de l'utilisateur et renvoie UNIQUEMENT un objet JSON valide "
-            "contenant les textes exacts qui devront être tapés ou cherchés. "
-            "RÈGLE ABSOLUE : Tu dois conserver l'orthographe EXACTE demandée par l'utilisateur (argot, blagues, fautes volontaires, mots inventés). "
-            "Ne corrige et ne modifie JAMAIS les mots de l'utilisateur. "
-            "N'ajoute aucun texte avant ou après le JSON."
-        )
-
+def save_api_key(api_key: str) -> bool:
     try:
-        response = client.chat.completions.create(
-            model="cohere/north-mini-code:free",
-            messages=[
-                {"role": "system", "content": sys_content},
-                {"role": "user", "content": f"Tâche : {task}"}
-            ]
-        )
-        content = response.choices[0].message.content.strip()
-        
-        if content.startswith("```json"):
-            content = content[7:-3].strip()
-        elif content.startswith("```"):
-            content = content[3:-3].strip()
-            
-        return json.loads(content)
+        clean_key = api_key.strip()
+        with open(API_KEY_FILE, "w", encoding="utf-8") as f:
+            f.write(clean_key)
+        os.environ["OPENROUTER_API_KEY"] = clean_key
+        return True
     except Exception as e:
-        print(f"[Arrière-plan] Avertissement ou pas de script complexe : {e}")
-        return None
+        print(f"[Erreur] Impossible d'enregistrer la clé API : {e}")
+        return False
 
-def get_active_monitor_info():
-    global CURRENT_MONITOR
-    if CURRENT_MONITOR >= len(sct.monitors):
-        CURRENT_MONITOR = 1
-    return sct.monitors[CURRENT_MONITOR]
 
-def capture_screen():
-    monitor = get_active_monitor_info()
-    sct_img = sct.grab(monitor)
-    screenshot = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-    screenshot = screenshot.resize((1280, 720))
-    buffered = io.BytesIO()
-    screenshot.save(buffered, format="JPEG", quality=95, optimize=True)
-    return base64.b64encode(buffered.getvalue()).decode("utf-8")
+def get_openrouter_client() -> OpenAI:
+    api_key = load_api_key()
+    if not api_key:
+        raise ValueError("Clé API OpenRouter manquante.")
+    return OpenAI(
+        base_url=OPENROUTER_BASE_URL,
+        api_key=api_key,
+        timeout=35.0,
+        max_retries=1,
+        default_headers={
+            "HTTP-Referer": "https://github.com/Alto0331/agent",
+            "X-Title": "VM Autonomous Agent Lite (Claude Haiku 5.5)",
+        },
+    )
 
-tools = [
+
+# ==============================================================================
+# 2. FRAPPE UNICODE WIN32 (IMMUNISÉE AZERTY/QWERTY POUR CISCO)
+# ==============================================================================
+PUL = ctypes.POINTER(ctypes.c_ulong)
+
+
+class KeyBdInput(ctypes.Structure):
+    _fields_ = [
+        ("wVk", ctypes.c_ushort),
+        ("wScan", ctypes.c_ushort),
+        ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", PUL),
+    ]
+
+
+class HardwareInput(ctypes.Structure):
+    _fields_ = [
+        ("uMsg", ctypes.c_ulong),
+        ("wParamL", ctypes.c_short),
+        ("wParamH", ctypes.c_ushort),
+    ]
+
+
+class MouseInput(ctypes.Structure):
+    _fields_ = [
+        ("dx", ctypes.c_long),
+        ("dy", ctypes.c_long),
+        ("mouseData", ctypes.c_ulong),
+        ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", PUL),
+    ]
+
+
+class Input_I(ctypes.Union):
+    _fields_ = [
+        ("ki", KeyBdInput),
+        ("mi", MouseInput),
+        ("hi", HardwareInput),
+    ]
+
+
+class Input(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_ulong),
+        ("ii", Input_I),
+    ]
+
+
+KEYEVENTF_UNICODE = 0x0004
+KEYEVENTF_KEYUP = 0x0002
+INPUT_KEYBOARD = 1
+
+
+def send_unicode_char(char: str):
+    code = ord(char)
+    extra = ctypes.c_ulong(0)
+
+    ii_down = Input_I()
+    ii_down.ki = KeyBdInput(0, code, KEYEVENTF_UNICODE, 0, ctypes.pointer(extra))
+    x_down = Input(ctypes.c_ulong(INPUT_KEYBOARD), ii_down)
+
+    ii_up = Input_I()
+    ii_up.ki = KeyBdInput(0, code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0, ctypes.pointer(extra))
+    x_up = Input(ctypes.c_ulong(INPUT_KEYBOARD), ii_up)
+
+    ctypes.windll.user32.SendInput(1, ctypes.pointer(x_down), ctypes.sizeof(x_down))
+    ctypes.windll.user32.SendInput(1, ctypes.pointer(x_up), ctypes.sizeof(x_up))
+
+
+def type_unicode_string(text: str, interval: float = 0.005, app_instance=None):
+    for ch in text:
+        if app_instance and getattr(app_instance, "stop_requested", False):
+            break
+        if ch == "\r":
+            continue
+        elif ch == "\n":
+            pyautogui.press("enter")
+            time.sleep(0.05)
+        else:
+            send_unicode_char(ch)
+            if interval > 0:
+                time.sleep(interval)
+
+
+# ==============================================================================
+# 3. CAPTURE & COORDONNÉES
+# ==============================================================================
+def get_screen_size():
+    return pyautogui.size()
+
+
+def capture_screen(draw_cursor: bool = True):
+    with mss.mss() as sct:
+        monitor = sct.monitors[1]
+        sct_img = sct.grab(monitor)
+        img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+
+    real_w, real_h = img.size
+
+    if draw_cursor:
+        try:
+            mx, my = pyautogui.position()
+            draw = ImageDraw.Draw(img)
+            r = 10
+            draw.ellipse((mx - r, my - r, mx + r, my + r), outline="#ef4444", width=3)
+            draw.line((mx - r - 4, my, mx + r + 4, my), fill="#ef4444", width=2)
+            draw.line((mx, my - r - 4, mx, my + r + 4), fill="#ef4444", width=2)
+        except Exception:
+            pass
+
+    small_hash_img = img.resize((64, 36), Image.Resampling.BILINEAR)
+    screen_hash = hashlib.md5(small_hash_img.tobytes()).hexdigest()
+
+    if (real_w, real_h) != (VISION_TARGET_WIDTH, VISION_TARGET_HEIGHT):
+        img_resized = img.resize((VISION_TARGET_WIDTH, VISION_TARGET_HEIGHT), Image.Resampling.LANCZOS)
+    else:
+        img_resized = img
+
+    buf = BytesIO()
+    img_resized.save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+    b64_str = base64.b64encode(buf.getvalue()).decode("utf-8")
+    return b64_str, screen_hash, (real_w, real_h)
+
+
+def resolve_xy(x: float, y: float) -> tuple[int, int]:
+    real_w, real_h = get_screen_size()
+    scale_x = real_w / float(VISION_TARGET_WIDTH)
+    scale_y = real_h / float(VISION_TARGET_HEIGHT)
+
+    final_x = int(round(float(x) * scale_x))
+    final_y = int(round(float(y) * scale_y))
+
+    final_x = max(2, min(real_w - 3, final_x))
+    final_y = max(2, min(real_h - 3, final_y))
+    return final_x, final_y
+
+
+# ==============================================================================
+# 4. PROMPTS ET SCHÉMA D'OUTILS LITE
+# ==============================================================================
+SYSTEM_PROMPT_LITE = f"""Tu es un agent d'exécution rapide et économique (Mode Lite - Claude Haiku 5.5).
+La capture d'écran reçue fait exactement {VISION_TARGET_WIDTH}x{VISION_TARGET_HEIGHT} pixels. Donne tes coordonnées dans ce repère.
+
+🔴 RÈGLES D'ACTION :
+- Tu es un automate direct : aucun bavardage, appelle directement les outils nécessaires.
+- Si une fenêtre ou une page charge, n'attends pas plus de 3 secondes (`wait` avec `seconds: 3`).
+- Dès que l'action demandée est terminée (ex: déplacer un fichier, entrer des commandes Cisco, valider une fenêtre), appelle IMMÉDIATEMENT `finish_task`.
+- INTERDICTION DE VÉRIFIER EN BOUCLE : ne refais aucun clic de vérification après avoir terminé.
+
+🔵 SPÉCIFICITÉS :
+1. CISCO PACKET TRACER : Clique sur la console CLI pour lui donner le focus, puis utilise EXCLUSIVEMENT `send_cisco_cli_block`.
+2. PDF : N'ouvre JAMAIS un PDF dans Docs ou Word. Utilise toujours l'outil `edit_pdf`.
+3. TEXTE & MISE EN PAGE : Utilise `type_text` pour injecter des blocs de texte propres sans fautes.
+"""
+
+TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "ask_human",
-            "description": "OUTIL DE SECOURS DE DERNIER RECOURS. Mets ton exécution en pause et pose une question à l'utilisateur humain dans l'interface de chat UNIQUEMENT si une information critique manque totalement (mot de passe, identifiant inconnu, site bloqué) ou après plusieurs échecs de clics. INTERDICTION de l'utiliser pour demander confirmation sur un choix de nom de fichier, de dossier, ou une déduction logique évidente.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "question": {"type": "string", "description": "La question précise à poser à l'humain."}
-                },
-                "required": ["question"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_clipboard",
-            "description": "Lit directement le texte présent dans le presse-papiers Windows. À utiliser après avoir fait un focus dans une zone de texte, un document Word, Excel, un mail ou une page web, puis exécuté press_shortcut avec ['ctrl', 'a'] et ['ctrl', 'c']. Permet d'ingérer de longs textes instantanément sans scroller ni faire d'erreurs d'OCR.",
-            "parameters": {
-                "type": "object",
-                "properties": {}
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_clipboard",
-            "description": "Copie un bloc de texte (comme un tableau TSV avec des \\t et \\n) directement dans le presse-papiers Windows. UTILISATION OBLIGATOIRE POUR EXCEL : formatte tes données en tableau, utilise cet outil, clique sur la cellule A1, puis fais un press_shortcut ['ctrl', 'v'] pour tout remplir instantanément.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string"}
-                },
-                "required": ["text"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "check_window_open",
-            "description": "Vérifie si une fenêtre contenant un nom donné est ouverte sur Windows et indique sur quel écran elle se trouve.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string"}
-                },
-                "required": ["title"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "switch_monitor",
-            "description": "Change l'écran observé par l'agent (1 ou 2).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "monitor_number": {"type": "integer", "enum": [1, 2]}
-                },
-                "required": ["monitor_number"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "mouse_click",
-            "description": "Effectue un clic simple sur l'écran actuellement observé (repère 1280x720).",
+            "name": "click_xy",
+            "description": f"Clique aux coordonnées (x, y) sur la grille {VISION_TARGET_WIDTH}x{VISION_TARGET_HEIGHT}.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "x": {"type": "integer"},
                     "y": {"type": "integer"},
-                    "button": {"type": "string", "enum": ["left", "right"], "default": "left"}
+                    "button": {"type": "string", "enum": ["left", "right", "middle"], "default": "left"},
+                    "clicks": {"type": "integer", "default": 1},
                 },
-                "required": ["x", "y"]
-            }
-        }
+                "required": ["x", "y"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
-            "name": "mouse_click_sequence",
-            "description": "OUTIL SPÉCIAL RAFALE : Effectue une série de clics rapides pour les actions GUI ordinaires (changement d'onglet, sélection ou placement de plusieurs équipements). NE PAS utiliser pour câbler des appareils : utiliser connect_multiple_devices.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "clicks": {
-                        "type": "array",
-                        "description": "Liste ordonnée des coordonnées à cliquer à la suite.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "x": {"type": "integer"},
-                                "y": {"type": "integer"},
-                                "button": {"type": "string", "enum": ["left", "right"], "default": "left"}
-                            },
-                            "required": ["x", "y"]
-                        }
-                    }
-                },
-                "required": ["clicks"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "connect_multiple_devices",
-            "description": "OUTIL OBLIGATOIRE POUR LE CABLAGE PACKET TRACER. Regroupe toutes les liaisons connues dans un seul appel. auto_x et auto_y doivent viser UNIQUEMENT l'icone de connexion automatique situee dans la rangee d'icones juste AU-DESSUS du libelle exact 'Automatically Choose Connection Type'. Ne clique pas sur le texte du libelle, sur une icone sous la barre de recherche ni sur un type de cable specifique. Pour CHAQUE liaison, l'outil reclique cette meme icone, puis clique sur l'appareil A et l'appareil B.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "auto_x": {"type": "integer"},
-                    "auto_y": {"type": "integer"},
-                    "connections": {
-                        "type": "array",
-                        "description": "Toutes les liaisons a effectuer, dans l'ordre, en une seule action.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "device_a": {
-                                    "type": "object",
-                                    "properties": {
-                                        "x": {"type": "integer"},
-                                        "y": {"type": "integer"}
-                                    },
-                                    "required": ["x", "y"]
-                                },
-                                "device_b": {
-                                    "type": "object",
-                                    "properties": {
-                                        "x": {"type": "integer"},
-                                        "y": {"type": "integer"}
-                                    },
-                                    "required": ["x", "y"]
-                                }
-                            },
-                            "required": ["device_a", "device_b"]
-                        }
-                    }
-                },
-                "required": ["auto_x", "auto_y", "connections"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "double_click",
-            "description": "Effectue un double-clic gauche rapide.",
+            "name": "double_click_xy",
+            "description": "Double-clique aux coordonnées (x, y).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "x": {"type": "integer"},
-                    "y": {"type": "integer"}
+                    "y": {"type": "integer"},
                 },
-                "required": ["x", "y"]
-            }
-        }
+                "required": ["x", "y"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "right_click_xy",
+            "description": "Clic droit aux coordonnées (x, y).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer"},
+                    "y": {"type": "integer"},
+                },
+                "required": ["x", "y"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "drag_and_drop",
-            "description": "Maintient le clic gauche enfoncé depuis (start_x, start_y) et glisse jusqu'à (end_x, end_y).",
+            "description": "Glisser-déposer de (start_x, start_y) jusqu'à (end_x, end_y) (idéal pour ranger des fichiers).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "start_x": {"type": "integer"},
                     "start_y": {"type": "integer"},
                     "end_x": {"type": "integer"},
-                    "end_y": {"type": "integer"}
+                    "end_y": {"type": "integer"},
+                    "duration": {"type": "number", "default": 0.4},
                 },
-                "required": ["start_x", "start_y", "end_x", "end_y"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "press_shortcut",
-            "description": "Exécute un raccourci clavier (ex: ['ctrl', 't'], ['enter'], ['esc'], ['ctrl', 'a'], ['ctrl', 'c'], ['ctrl', 'v']).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "keys": {
-                        "type": "array",
-                        "items": {"type": "string"}
-                    }
-                },
-                "required": ["keys"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "mouse_scroll",
-            "description": "Place le curseur en (x, y) et fait tourner la molette.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "x": {"type": "integer"},
-                    "y": {"type": "integer"},
-                    "direction": {"type": "string", "enum": ["up", "down"]},
-                    "amount": {"type": "integer", "default": 5}
-                },
-                "required": ["x", "y", "direction"]
-            }
-        }
+                "required": ["start_x", "start_y", "end_x", "end_y"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "type_text",
-            "description": "Saisie clavier manuelle rapide, sans presse-papiers. Accepte plusieurs champs/lignes dans un seul appel : utilise \\t pour passer au champ suivant et \\n pour valider une ligne ou une commande, seulement si l'ordre de navigation est certain. ATTENTION : NE PAS UTILISER POUR LES TABLEAUX EXCEL.",
+            "description": "Écrit un texte complet sans déformation de layout ni bug AZERTY/QWERTY.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "text": {"type": "string"},
-                    "press_enter": {"type": "boolean", "default": False}
+                    "press_enter": {"type": "boolean", "default": False},
+                    "clear_first": {"type": "boolean", "default": False},
                 },
-                "required": ["text"]
-            }
-        }
+                "required": ["text"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "send_cisco_cli_block",
-            "description": "Envoie du texte ou des commandes dans un terminal/CLI ouvert (Cisco IOS ou autre CLI). Avant l’appel, le curseur doit être dans la zone de saisie. Après l’envoi, vérifie visuellement que le texte apparaît. Si rien n’apparaît, clique à la fin de la dernière ligne visible du terminal, puis réessaie une seule fois.",
+            "description": "Tape un bloc de commandes IOS dans Cisco Packet Tracer CLI sans bug de clavier.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "commands": {
-                        "type": "string",
-                        "description": "Bloc de commandes Cisco IOS séparées par des sauts de ligne \\n (ou simplement 'no' pour sortir du dialogue initial)"
-                    }
+                    "commands": {"type": "string"},
                 },
-                "required": ["commands"]
-            }
-        }
+                "required": ["commands"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_pdf",
+            "description": "Inspecte ou modifie un PDF en conservant la mise en page (champs AcroForm, remplacement, texte, signature).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["inspect", "modify"]},
+                    "pdf_path": {"type": "string"},
+                    "output_path": {"type": "string"},
+                    "form_fields": {"type": "object"},
+                    "replacements": {"type": "array", "items": {"type": "object"}},
+                    "insert_texts": {"type": "array", "items": {"type": "object"}},
+                    "insert_images": {"type": "array", "items": {"type": "object"}},
+                },
+                "required": ["action", "pdf_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "press_key",
+            "description": "Appuie sur une touche spéciale.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string"},
+                    "presses": {"type": "integer", "default": 1},
+                },
+                "required": ["key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "hotkey",
+            "description": "Exécute un raccourci clavier.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keys": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["keys"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scroll",
+            "description": "Fait défiler la molette.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "amount": {"type": "integer"},
+                    "x": {"type": "integer"},
+                    "y": {"type": "integer"},
+                },
+                "required": ["amount"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_app_or_url",
+            "description": "Lance une application ou ouvre une URL.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string"},
+                },
+                "required": ["target"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "focus_window",
+            "description": "Met au premier plan une fenêtre contenant ce titre.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title_substring": {"type": "string"},
+                },
+                "required": ["title_substring"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "wait",
-            "description": "Patiente quand un équipement démarre ou charge.",
+            "description": "Attente (max 3 secondes).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "seconds": {"type": "number"}
+                    "seconds": {"type": "number", "default": 3.0},
                 },
-                "required": ["seconds"]
-            }
-        }
+                "required": ["seconds"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_human",
+            "description": "Demande une indication à l'utilisateur.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                },
+                "required": ["question"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "finish_task",
-            "description": "À appeler dès que la tâche demandée est totally terminée.",
+            "description": "Termine la mission immédiatement sans faire de clics superflus.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "message": {"type": "string"}
+                    "summary": {"type": "string"},
                 },
-                "required": ["message"]
-            }
-        }
-    }
+                "required": ["summary"],
+            },
+        },
+    },
 ]
 
-def move_mouse_smoothly(real_x, real_y):
-    current_x, current_y = pyautogui.position()
-    distance = ((real_x - current_x) ** 2 + (real_y - current_y) ** 2) ** 0.5
-    move_duration = max(0.10, min(0.65, distance / 1800))
-    pyautogui.moveTo(
-        real_x,
-        real_y,
-        duration=move_duration,
-        tween=pyautogui.easeInOutQuad
-    )
 
-def execute_action(name, args, app_instance=None):
-    global CURRENT_MONITOR
-    monitor = get_active_monitor_info()
-    mon_left = monitor["left"]
-    mon_top = monitor["top"]
-    mon_w = monitor["width"]
-    mon_h = monitor["height"]
-    
-    if name == "ask_human":
-        question = args["question"]
-        if app_instance:
-            app_instance.log(f"🤖 L'agent a besoin d'aide : {question}\n", "agent")
-            app_instance.wait_for_human()
-            reponse = app_instance.human_response
-            app_instance.log(f"👤 Vous avez répondu : {reponse}\n", "user")
-            return f"L'utilisateur a répondu : {reponse}"
-        else:
-             print(f"🤖 L'agent a besoin d'aide : {question}")
-             return "Impossible de contacter l'utilisateur."
+def prepare_task_data(task: str) -> dict:
+    t_low = task.lower()
+    hints = []
+    if any(k in t_low for k in ["cisco", "packet tracer", "vlan", "routeur", "switch", "ospf", "cli"]):
+        hints.append("MODE CISCO : Utilise send_cisco_cli_block pour taper les commandes dans l'IOS.")
+    if any(k in t_low for k in ["pdf", "formulaire", "contrat", "signer"]):
+        hints.append("MODE PDF : N'ouvre pas Docs/Word, utilise l'outil edit_pdf.")
+    if any(k in t_low for k in ["tri", "trier", "dossier", "déplacer", "deplacer", "ranger"]):
+        hints.append("MODE TRI : Repère l'élément à déplacer et utilise drag_and_drop ou Ctrl+X / Ctrl+V.")
+    return {"task": task, "hints": "\n".join(hints) if hints else "Exécution directe."}
 
-    elif name == "read_clipboard":
-        try:
-            content = pyperclip.paste()
-            limite = 15000
-            if len(content) > limite:
-                return f"Contenu du presse-papiers ingéré (tronqué aux {limite} premiers caractères) :\n\n{content[:limite]}"
-            return f"Contenu du presse-papiers ingéré avec succès :\n\n{content}"
-        except Exception as e:
-            return f"Erreur lors de la lecture du presse-papiers : {e}"
 
-    elif name == "write_clipboard":
-        try:
-            pyperclip.copy(args["text"])
-            return "Texte chargé dans le presse-papiers. Prêt à être collé (press_shortcut ['ctrl', 'v'])."
-        except Exception as e:
-            return f"Erreur du presse-papiers : {e}"
+# ==============================================================================
+# 5. EXÉCUTION DES OUTILS
+# ==============================================================================
+def _find_brave_exe() -> str | None:
+    brave_paths = [
+        os.path.expandvars(r"%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+        os.path.expandvars(r"%LocalAppData%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+    ]
+    for p in brave_paths:
+        if os.path.exists(p):
+            return p
+    return None
 
-    elif name == "switch_monitor":
-        target_mon = int(args["monitor_number"])
-        if target_mon < len(sct.monitors):
-            CURRENT_MONITOR = target_mon
-            return f"Vision basculée avec succès."
-        return "Erreur d'écran."
 
-    elif name == "mouse_click":
-        real_x = mon_left + int(args["x"] * mon_w / 1280)
-        real_y = mon_top + int(args["y"] * mon_h / 720)
-        button = args.get("button", "left")
-        move_mouse_smoothly(real_x, real_y)
-        time.sleep(0.04)
-        pyautogui.click(button=button)
-        return "Clic effectué."
+def _resolve_pdf_path(raw_path: str) -> str:
+    expanded = os.path.expanduser(os.path.expandvars(raw_path.strip().strip('"').strip("'")))
+    if os.path.exists(expanded):
+        return os.path.abspath(expanded)
+    filename = os.path.basename(expanded)
+    user_profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
+    search_dirs = [
+        os.path.join(user_profile, "Downloads"),
+        os.path.join(user_profile, "Desktop"),
+        os.path.join(user_profile, "Documents"),
+        os.getcwd(),
+    ]
+    for d in search_dirs:
+        cand = os.path.join(d, filename)
+        if os.path.exists(cand):
+            return os.path.abspath(cand)
+    return expanded
 
-    elif name == "mouse_click_sequence":
-        for click_data in args["clicks"]:
-            if app_instance and app_instance.stop_requested:
-                return "Interrompu par l'utilisateur."
-            real_x = mon_left + int(click_data["x"] * mon_w / 1280)
-            real_y = mon_top + int(click_data["y"] * mon_h / 720)
-            button = click_data.get("button", "left")
-            move_mouse_smoothly(real_x, real_y)
-            time.sleep(0.04)
-            pyautogui.click(button=button)
-            time.sleep(0.055)
-        return f"Séquence de {len(args['clicks'])} clics exécutée d'un coup avec succès."
 
-    elif name == "connect_multiple_devices":
-        auto_x = mon_left + int(args["auto_x"] * mon_w / 1280)
-        auto_y = mon_top + int(args["auto_y"] * mon_h / 720)
-        connections = args.get("connections", [])
+def _handle_edit_pdf(args: dict) -> str:
+    if fitz is None:
+        return "PyMuPDF (fitz) n'est pas disponible."
+    action = str(args.get("action", "inspect")).lower()
+    pdf_path = _resolve_pdf_path(args.get("pdf_path", ""))
+    if not os.path.exists(pdf_path):
+        return f"PDF introuvable : {pdf_path}"
 
-        if not connections:
-            return "Aucune liaison fournie."
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception as e:
+        return f"Erreur ouverture PDF : {e}"
 
-        for index, connection in enumerate(connections, start=1):
-            if app_instance and app_instance.stop_requested:
-                return "Interrompu par l'utilisateur."
-            move_mouse_smoothly(auto_x, auto_y)
-            time.sleep(0.04)
-            pyautogui.click(button="left")
-            time.sleep(0.20)
+    try:
+        if action == "inspect":
+            out = [f"📄 PDF : {pdf_path} ({len(doc)} pages)"]
+            for idx in range(min(len(doc), 5)):
+                page = doc[idx]
+                out.append(f"Page {idx} ({int(page.rect.width)}x{int(page.rect.height)}) :")
+                for w in (page.widgets() or [])[:25]:
+                    out.append(f"  - Champ '{w.field_name}' = '{w.field_value}' [{int(w.rect.x0)}, {int(w.rect.y0)}]")
+                for b in (page.get_text("blocks") or [])[:20]:
+                    t_clean = " ".join(str(b[4]).splitlines()).strip()
+                    if t_clean:
+                        out.append(f"  - [{int(b[0])}, {int(b[1])}] : {t_clean[:70]}")
+            doc.close()
+            return "\n".join(out)
 
-            for device in (connection["device_a"], connection["device_b"]):
-                if app_instance and app_instance.stop_requested:
-                    return "Interrompu par l'utilisateur."
-                real_x = mon_left + int(device["x"] * mon_w / 1280)
-                real_y = mon_top + int(device["y"] * mon_h / 720)
-                move_mouse_smoothly(real_x, real_y)
-                time.sleep(0.04)
-                pyautogui.click(button="left")
-                time.sleep(0.16)
-            time.sleep(0.20)
+        elif action == "modify":
+            for page in doc:
+                for w in (page.widgets() or []):
+                    if w.field_name in (args.get("form_fields") or {}):
+                        w.field_value = str(args["form_fields"][w.field_name])
+                        w.update()
 
-        return (f"Lot termine : {len(connections)} liaison(s) envoyee(s). "
-                "Observe une nouvelle capture pour verifier visuellement les cables.")
-
-    elif name == "double_click":
-        real_x = mon_left + int(args["x"] * mon_w / 1280)
-        real_y = mon_top + int(args["y"] * mon_h / 720)
-        move_mouse_smoothly(real_x, real_y)
-        time.sleep(0.04)
-        pyautogui.doubleClick(button="left")
-        return "Double-clic effectué."
-
-    elif name == "drag_and_drop":
-        start_real_x = mon_left + int(args["start_x"] * mon_w / 1280)
-        start_real_y = mon_top + int(args["start_y"] * mon_h / 720)
-        end_real_x = mon_left + int(args["end_x"] * mon_w / 1280)
-        end_real_y = mon_top + int(args["end_y"] * mon_h / 720)
-        
-        move_mouse_smoothly(start_real_x, start_real_y)
-        time.sleep(0.08)
-        pyautogui.mouseDown(button="left")
-        time.sleep(0.08)
-        dist = ((end_real_x - start_real_x) ** 2 + (end_real_y - start_real_y) ** 2) ** 0.5
-        drag_duration = max(0.35, min(0.75, dist / 1500))
-        pyautogui.moveTo(end_real_x, end_real_y, duration=drag_duration, tween=pyautogui.easeInOutQuart)
-        time.sleep(0.08)
-        pyautogui.mouseUp(button="left")
-        return "Glisser-déposer réussi."
-
-    elif name == "press_shortcut":
-        keys = [k.lower().strip() for k in args.get("keys", [])]
-        pyautogui.hotkey(*keys)
-        time.sleep(0.12)
-        return "Raccourci exécuté."
-
-    elif name == "mouse_scroll":
-        real_x = mon_left + int(args["x"] * mon_w / 1280)
-        real_y = mon_top + int(args["y"] * mon_h / 720)
-        direction = args.get("direction", "down")
-        amount = int(args.get("amount", 5))
-        
-        move_mouse_smoothly(real_x, real_y)
-        time.sleep(0.06)
-        step_scroll = 120 if direction == "up" else -120
-        for _ in range(amount):
-            if app_instance and app_instance.stop_requested:
-                return "Interrompu par l'utilisateur."
-            pyautogui.scroll(step_scroll)
-            time.sleep(0.02)
-        return "Défilement effectué."
-        
-    elif name == "type_text":
-        text = args["text"]
-        old_pause = pyautogui.PAUSE
-        pyautogui.PAUSE = 0
-        try:
-            parts = re.split(r'(\n|\t)', text)
-            for part in parts:
-                if app_instance and app_instance.stop_requested:
-                    return "Interrompu par l'utilisateur."
-                if not part:
+            for item in (args.get("replacements") or []):
+                s, r = str(item.get("search", "")), str(item.get("replace", ""))
+                if not s:
                     continue
-                if part == '\n':
-                    pyautogui.press('enter')
-                    time.sleep(0.12)
-                elif part == '\t':
-                    pyautogui.press('tab')
-                    time.sleep(0.08)
-                else:
-                    chunks = re.findall(r'\S+|\s+', part)
-                    for chunk in chunks:
-                        if app_instance and app_instance.stop_requested:
-                            return "Interrompu par l'utilisateur."
-                        pyperclip.copy(chunk)
-                        time.sleep(0.02)
-                        pyautogui.hotkey('ctrl', 'v')
-                        time.sleep(0.03)
-        finally:
-            pyautogui.PAUSE = old_pause
+                for page in doc:
+                    hits = page.search_for(s)
+                    if hits:
+                        q = []
+                        for h in hits:
+                            page.add_redact_annot(h, fill=(1, 1, 1))
+                            q.append((fitz.Point(h.x0, h.y1 - (h.height * 0.18)), r, max(8.0, round(h.height * 0.78, 1))))
+                        page.apply_redactions()
+                        for pt, txt, fs in q:
+                            page.insert_text(pt, txt, fontsize=fs, fontname="helv", color=(0, 0, 0))
 
-        if args.get("press_enter", False):
-            pyautogui.press("enter")
-            
-        return "Texte rédigé avec succès (Frappe organique par blocs)."
-
-    elif name == "send_cisco_cli_block":
-        commands_raw = args["commands"]
-        lines = [line.strip() for line in commands_raw.splitlines() if line.strip()]
-        old_pause = pyautogui.PAUSE
-        pyautogui.PAUSE = 0
-
-        if len(lines) == 1 and lines[0].lower() in ["no", "n"]:
-            try:
-                pyautogui.write("no", interval=0)
-                pyautogui.press("enter")
-                time.sleep(0.8)
-                pyautogui.press("enter")
-                time.sleep(0.25)
-            finally:
-                pyautogui.PAUSE = old_pause
-            return "Texte 'no' tapé manuellement."
-
-        pyautogui.press("enter")
-        time.sleep(0.35)
-
-        config_markers = {"configure terminal", "conf t", "conf terminal"}
-        has_config_mode = any(line.strip().lower() in config_markers for line in lines)
-        if lines and lines[0].strip().lower() in config_markers:
-            lines.insert(0, "enable")
-        elif has_config_mode and lines and lines[0].strip().lower() not in {"enable", "en"}:
-            lines.insert(0, "enable")
-
-        if has_config_mode and not any("no ip domain-lookup" in line.lower() for line in lines):
-            for i, line in enumerate(lines):
-                if line.strip().lower() in config_markers:
-                    lines.insert(i + 1, "no ip domain-lookup")
-                    break
-
+            out_path = _resolve_pdf_path(args.get("output_path") or pdf_path)
+            if os.path.abspath(out_path) == os.path.abspath(pdf_path):
+                tmp = pdf_path + ".tmp.pdf"
+                doc.save(tmp, garbage=3, deflate=True)
+                doc.close()
+                os.replace(tmp, pdf_path)
+            else:
+                doc.save(out_path, garbage=3, deflate=True)
+                doc.close()
+            return f"PDF modifié et sauvegardé : {out_path}"
+    except Exception as e:
         try:
-            for line in lines:
-                if app_instance and app_instance.stop_requested:
-                    return "Interrompu par l'utilisateur."
-                for char in line:
-                    pyautogui.write(char, interval=0)
-                    time.sleep(0.004)
+            doc.close()
+        except Exception:
+            pass
+        return f"Erreur PDF : {e}"
+
+
+def execute_action(name: str, args: dict, app_instance=None) -> str:
+    if app_instance and getattr(app_instance, "stop_requested", False):
+        return "Interrompu par l'utilisateur."
+
+    try:
+        if name == "click_xy":
+            rx, ry = resolve_xy(args["x"], args["y"])
+            btn = args.get("button", "left")
+            clicks = int(args.get("clicks", 1))
+            pyautogui.moveTo(rx, ry, duration=0.22, tween=pyautogui.easeOutQuad)
+            pyautogui.click(rx, ry, clicks=clicks, interval=0.06, button=btn)
+            time.sleep(0.12)
+            return f"Clic ({btn} x{clicks}) en ({rx}, {ry})."
+
+        elif name == "double_click_xy":
+            rx, ry = resolve_xy(args["x"], args["y"])
+            pyautogui.moveTo(rx, ry, duration=0.22, tween=pyautogui.easeOutQuad)
+            pyautogui.doubleClick(rx, ry, interval=0.06)
+            time.sleep(0.2)
+            return f"Double-clic en ({rx}, {ry})."
+
+        elif name == "right_click_xy":
+            rx, ry = resolve_xy(args["x"], args["y"])
+            pyautogui.moveTo(rx, ry, duration=0.22, tween=pyautogui.easeOutQuad)
+            pyautogui.rightClick(rx, ry)
+            time.sleep(0.15)
+            return f"Clic droit en ({rx}, {ry})."
+
+        elif name == "drag_and_drop":
+            sx, sy = resolve_xy(args["start_x"], args["start_y"])
+            ex, ey = resolve_xy(args["end_x"], args["end_y"])
+            dur = max(0.25, float(args.get("duration", 0.4)))
+            pyautogui.moveTo(sx, sy, duration=0.2, tween=pyautogui.easeOutQuad)
+            pyautogui.dragTo(ex, ey, duration=dur, button="left", tween=pyautogui.easeInOutQuad)
+            time.sleep(0.15)
+            return f"Glisser-déposer de ({sx}, {sy}) vers ({ex}, {ey})."
+
+        elif name == "type_text":
+            text = str(args.get("text", ""))
+            if not text:
+                return "Texte vide."
+            if args.get("clear_first", False):
+                pyautogui.hotkey("ctrl", "a")
+                time.sleep(0.03)
+                pyautogui.press("backspace")
+                time.sleep(0.03)
+
+            norm = text.replace("\r\n", "\n").replace("\n", "\r\n")
+            pyperclip.copy(norm)
+            time.sleep(0.03)
+            pyautogui.hotkey("ctrl", "v")
+            time.sleep(0.08)
+            if args.get("press_enter", False):
                 pyautogui.press("enter")
-                time.sleep(0.28)
-        finally:
-            pyautogui.PAUSE = old_pause
+                time.sleep(0.06)
+            return "Texte rédigé avec succès."
 
-        time.sleep(0.25)
-        return f"{len(lines)} ligne(s) tapée(s) manuellement."
+        elif name == "edit_pdf":
+            return _handle_edit_pdf(args)
 
-    elif name == "wait":
-        duree = min(max(float(args.get("seconds", 2)), 0.5), 10.0)
-        pas = 0.2
-        ecoule = 0.0
-        while ecoule < duree:
-            if app_instance and app_instance.stop_requested:
-                return "Attente interrompue par l'utilisateur."
-            time.sleep(pas)
-            ecoule += pas
-        return "Attente terminée."
-        
-    elif name == "check_window_open":
-        target = args["title"].lower()
-        windows = [w for w in gw.getAllWindows() if w.title.strip() and target in w.title.lower()]
-        if windows:
-            return "Fenêtre ouverte."
-        return "Fenêtre introuvable."
+        elif name == "send_cisco_cli_block":
+            commands_raw = str(args.get("commands", ""))
+            lines = [l.strip() for l in commands_raw.splitlines() if l.strip()]
+            if not lines:
+                return "Aucune commande Cisco."
 
-    elif name == "finish_task":
-        if app_instance:
-             app_instance.log(f"✅ Mission accomplie : {args['message']}\n", "system")
-        return "FIN"
-        
-    return "Action non reconnue"
+            old_p = pyautogui.PAUSE
+            pyautogui.PAUSE = 0
+            try:
+                if len(lines) == 1 and lines[0].lower() in ["no", "n"]:
+                    type_unicode_string("no", interval=0.01, app_instance=app_instance)
+                    pyautogui.press("enter")
+                    time.sleep(0.3)
+                    pyautogui.press("enter")
+                    return "Réponse 'no' envoyée."
 
-def run_agent(task, app_instance=None):
-    if client is None and init_openai_client() is None:
-        if app_instance:
-            app_instance.log("🔑 Erreur : Aucune clé API enregistrée.\n", "error")
+                pyautogui.press("enter")
+                time.sleep(0.12)
+                for l in lines:
+                    if app_instance and getattr(app_instance, "stop_requested", False):
+                        return "Interrompu."
+                    type_unicode_string(l, interval=0.005, app_instance=app_instance)
+                    time.sleep(0.02)
+                    pyautogui.press("enter")
+                    time.sleep(0.15)
+            finally:
+                pyautogui.PAUSE = old_p
+            return f"{len(lines)} commande(s) Cisco tapée(s)."
+
+        elif name == "press_key":
+            key = str(args.get("key", "enter")).lower()
+            presses = int(args.get("presses", 1))
+            pyautogui.press(key, presses=presses, interval=0.04)
+            time.sleep(0.1)
+            return f"Touche '{key}' ({presses}x)."
+
+        elif name == "hotkey":
+            keys = [str(k).lower() for k in args.get("keys", [])]
+            if keys:
+                pyautogui.hotkey(*keys)
+                time.sleep(0.12)
+            return f"Raccourci {'+'.join(keys)}."
+
+        elif name == "scroll":
+            amt = int(args.get("amount", -500))
+            if "x" in args and "y" in args and args["x"] is not None and args["y"] is not None:
+                rx, ry = resolve_xy(args["x"], args["y"])
+                pyautogui.moveTo(rx, ry, duration=0.18, tween=pyautogui.easeOutQuad)
+            pyautogui.scroll(amt)
+            time.sleep(0.15)
+            return f"Scroll ({amt})."
+
+        elif name == "open_app_or_url":
+            t = str(args.get("target", "")).strip()
+            brave = _find_brave_exe()
+            if t.lower().startswith(("http://", "https://", "www.")):
+                u = t if t.lower().startswith("http") else f"https://{t}"
+                subprocess.Popen([brave, u]) if brave else os.startfile(u)
+                time.sleep(1.0)
+                return f"URL ouverte : {u}"
+            if t.lower() in ["brave", "brave.exe", "browser"] and brave:
+                subprocess.Popen([brave])
+                time.sleep(0.9)
+                return "Brave lancé."
+            try:
+                subprocess.Popen(t, shell=True)
+            except Exception:
+                os.startfile(t)
+            time.sleep(0.9)
+            return f"Cible lancée : {t}"
+
+        elif name == "focus_window":
+            sub = str(args.get("title_substring", "")).lower().strip()
+            wins = [w for w in gw.getAllWindows() if w.title and sub in w.title.lower()]
+            if not wins:
+                return f"Fenêtre '{sub}' introuvable."
+            w = wins[0]
+            try:
+                if w.isMinimized:
+                    w.restore()
+                w.activate()
+                time.sleep(0.2)
+            except Exception:
+                pass
+            return f"Fenêtre '{w.title}' au premier plan."
+
+        elif name == "wait":
+            secs = min(3.0, max(0.2, float(args.get("seconds", 3.0))))
+            time.sleep(secs)
+            return f"Attente {secs:.1f}s."
+
+        return f"Outil inconnu : {name}"
+    except Exception as e:
+        return f"Erreur {name} : {e}"
+
+
+# ==============================================================================
+# 6. BOUCLE PRINCIPALE LITE (CLAUDE HAIKU 5.5)
+# ==============================================================================
+def run_agent(task: str, app_instance=None, max_steps: int = 35):
+    def log_msg(txt: str, tag: str = "system"):
+        if app_instance and hasattr(app_instance, "log"):
+            app_instance.log(txt, tag)
+        else:
+            print(txt, end="")
+
+    try:
+        client = get_openrouter_client()
+    except Exception as e:
+        log_msg(f"❌ {e}\n", "error")
         return
 
-    nb_ecrans = len(sct.monitors) - 1
-    consigne_base = (
-        "Tu es un agent autonome contrôlant Windows, capable d'accomplir n'importe quelle mission bureautique, réseau Cisco, web, téléchargement ou recherche de façon totalement autonome. "
-        f"L'ordinateur possède {nb_ecrans} écran(s). Tu observes l'écran {CURRENT_MONITOR}.\n\n"
-        "🟢 RÈGLE D'OR : NAVIGATION WEB PROFONDE & RECHERCHE ACTIVE :\n"
-        "1. INTERDICTION DE S'ARRÊTER AUX RÉSULTATS DE RECHERCHE : Une page Google/Brave Search n'est qu'un tremplin. Il est FORMELLEMENT INTERDIT d'appeler 'finish_task' depuis une page de moteur de recherche si des détails précis (pilotes, prix exacts, caractéristiques, fichiers à télécharger) sont demandés. Tu DOIS cliquer sur le lien le plus pertinent pour entrer sur le site source.\n"
-        "2. GESTION DES COOKIES & CHARGEMENTS : En entrant sur un site, ferme immédiatement les bandeaux de cookies (bouton 'Accepter', 'Refuser' ou touche 'esc'), attends avec wait si nécessaire, puis explore.\n"
-        "3. EXHAUSTIVITÉ DU CAHIER DES CHARGES : Avant d'appeler 'finish_task', relis mentalement la tâche initiale. Si l'utilisateur a demandé plusieurs éléments, n'arrête pas avant d'avoir navigué pour tous les obtenir.\n"
-        "4. INGESTION PAR LE PRESSE-PAPIERS : Dès que tu arrives sur la page cible, fais un clic au centre, presse ['ctrl', 'a'], ['ctrl', 'c'], puis appelle 'read_clipboard'. Cela t'évite de scroller et te donne l'intégralité des données d'un coup.\n\n"
-        "🟢 AUTONOMIE, PRISE D'INITIATIVE ET ZÉRO HÉSITATION :\n"
-        "Tu as l'autorisation stricte d'agir seul et de déduire les informations logiques sans demander confirmation.\n"
-        "1. NAVIGUABILITÉ & GESTION DES FENÊTRES : Ne demande JAMAIS d'aide pour changer d'application. Utilise la barre des tâches de Windows, ouvre des onglets navigateur avec ['ctrl', 't'], ferme avec ['ctrl', 'w'], clique pour basculer d'une fenêtre à une autre.\n"
-        "2. INITIATIVE BUREAUTIQUE & FICHIERS : Ne demande JAMAIS comment nommer un fichier, dans quel dossier le ranger ou comment trier un cours. Analyse le contexte et nomme-le de manière logique (ex: 'Cours_Chapitre1_Reseau.docx'). Crée des dossiers pertinents par matière/chapitre sur le bureau ou dans les documents si nécessaire.\n"
-        "3. RECHERCHE WEB & PROJETS : Si l'utilisateur te demande de chercher des composants (ex: config PC), des cours ou de traiter des mails, explore les sites, compare les prix/caractéristiques toi-même, sélectionne les options cohérentes avec le budget et synthétise le résultat sans hésitation.\n"
-        "4. DÉDUCTION RÉSEAU : Si tu configures un équipement et qu'il te manque un détail mineur, déduis-le logiquement à partir des scripts en arrière-plan ou des éléments déjà configurés à l'écran. N'invente pas, connecte les points.\n"
-        "5. OUTIL DE SECOURS (ask_human) : N'utilise cet outil qu'en DERNIER RECOURS ABSOLU, uniquement si une donnée critique manque totalement (ex: mot de passe non fourni) ou en cas de blocage physique persistant. Ne l'utilise jamais pour valider un nom, un titre ou une étape intermédiaire.\n"
-        "6. ADAPTABILITÉ ET DÉCOUVERTE D'OUTILS WEB : Si ta méthode actuelle pour traiter une information ou un fichier échoue ou détruit le formatage (ex: éditer un PDF dans Google Docs déforme le texte), abandonne cette méthode. Ouvre le navigateur Brave (n'utilise JAMAIS Edge) et cherche un outil web gratuit spécialisé (ex: 'éditeur PDF en ligne', 'convertisseur web'). LIMITATION CRITIQUE : Cette permission de chercher des alternatives s'applique uniquement à la bureautique et aux tâches web. Ne cherche JAMAIS de logiciel alternatif pour un programme métier installé comme Cisco Packet Tracer ; pour ce dernier, tu dois résoudre le problème en interne.\n"
-        "7. GESTION DES TRAITEMENTS DE TEXTE (WORD / DOCS) : N'essaie JAMAIS d'obtenir une mise en page parfaite au millimètre près. Si un logiciel comme Word Online transforme une ligne en liste à puces ou ajoute un retrait, IGNORE-LE et poursuis ta tâche. Il est FORMELLEMENT INTERDIT d'effacer tout le document avec ['ctrl', 'a'] pour le retaper plusieurs fois. Tape le texte une seule fois en bloc, puis appelle directement finish_task.\n"
-        "8. EXCEL ET TABLEAUX : Pour remplir un tableur, n'utilise JAMAIS 'type_text' case par case. Formate toutes tes données sous forme de texte TSV (les colonnes séparées par '\\t' et les lignes par '\\n'). Utilise l'outil 'write_clipboard' pour charger ce bloc en mémoire, clique sur la cellule de départ (ex: A1) et utilise 'press_shortcut' avec ['ctrl', 'v']. Excel rangera instantanément chaque mot dans la bonne case.\n\n"
-        "⚠️ RÈGLES DE SÉCURITÉ PACKET TRACER (POUR ÉVITER LES BUGS) ⚠️\n"
-        "1. INTERDICTION DE LA BARRE DE RECHERCHE : N'utilise JAMAIS la zone de texte 'Search for device' en bas à gauche de Packet Tracer. C'est formellement interdit car cela sélectionne souvent des modèles incompatibles. Tu DOIS cliquer physiquement sur l'icône de la catégorie (ex: 'End Devices' ou 'Network Devices') puis sur le modèle exact souhaité.\n"
-        "2. POP-UPS D'ERREUR BLOQUANTS : Si une fenêtre d'erreur apparaît à l'écran (par exemple 'The cable cannot be connected to that port'), cela signifie qu'un modèle incorrect a été placé ou qu'un port est plein. Utilise immédiatement l'outil 'press_shortcut' avec la touche ['esc'] ou ['enter'] pour fermer l'erreur, supprime le mauvais équipement si besoin, et reprends la tâche.\n\n"
-        "⚠️ RÈGLE ABSOLUE POUR COMMUNIQUER (ask_human) ⚠️\n"
-        "INTERDICTION FORMELLE de poser des questions ou de demander des confirmations dans tes simples réflexions textuelles. L'utilisateur NE PEUT PAS y répondre. "
-        "Si tu es bloqué, qu'il te manque une information (comme une adresse e-mail), ou que tu as un doute, tu DOIS OBLIGATOIREMENT appeler la fonction 'ask_human'. C'est le SEUL et UNIQUE moyen d'afficher une boîte de dialogue à l'utilisateur pour qu'il te débloque.\n\n"
-        "PLANIFICATION RAPIDE ET REGROUPEMENT DES ACTIONS :\n"
-        "Depuis CHAQUE capture d'écran, établis une liste ordonnée des prochaines actions concrètes nécessaires pour atteindre l'objectif, y compris les équipements de catégories différentes, les champs à remplir et les commandes à saisir. "
-        "Exécute ensuite toute la séquence dont les cibles sont déjà visibles et dont les coordonnées restent valides, sans demander une capture après chaque action. "
-        "Après avoir placé un équipement, ne place pas automatiquement un deuxième du même type : consulte la liste des éléments requis et identifie le prochain élément réellement nécessaire, même s'il est dans une autre catégorie. "
-        "Si le prochain élément est dans une autre catégorie, clique sur cette catégorie, sélectionne le modèle correspondant puis place-le à une position distincte, dans la même séquence si les coordonnées sont connues. "
-        "Répète ce raisonnement jusqu'à ce qu'une nouvelle capture soit indispensable pour identifier un modèle ou une cible inconnue. N'utilise pas une capture comme excuse pour interrompre une séquence dont les prochaines étapes sont déjà connues. "
-        "RÈGLE DE CATÉGORIE PACKET TRACER : pour placer un PC, un Laptop, un Server ou un autre terminal utilisateur, sélectionne la catégorie 'End Devices'. Ne cherche JAMAIS les PC dans 'Miscellaneous'. Pour un switch, va dans 'Network Devices' puis 'Switches'; pour un routeur, 'Network Devices' puis 'Routers'. "
-        "Groupe les clics de changement de catégorie, choix du modèle et placement dans mouse_click_sequence lorsque les coordonnées sont connues et stables. "
-        "Si la liste des modèles change et que la position du modèle suivant n'est pas certaine, fais une capture à ce seul point, puis reprends la séquence. "
-        "Utilise mouse_click_sequence pour plusieurs clics et un seul appel type_text pour saisir une série de valeurs quand l'ordre des champs est prévisible (utilise \\t pour passer au champ suivant, et \\n uniquement pour valider/changer de ligne si c'est le comportement attendu). Pour une CLI, envoie le bloc complet avec send_cisco_cli_block. "
-        "Pour placer plusieurs objets, choisis des emplacements clairement séparés; ne clique jamais deux fois au même endroit pour placer deux appareils.\n"
-        "L'agent doit rester generaliste : Packet Tracer, le navigateur ou les logiciels bureautiques sont des applications graphiques comme les autres. Utilise les outils GUI disponibles pour toute fonction demandee.\n\n"
-        "📚 RÈGLES DE NAVIGATION PACKET TRACER (TOUT SE PASSE EN BAS À GAUCHE) :\n"
-        "1. POSER PLUSIEURS ÉQUIPEMENTS D'UN COUP : Avec mouse_click_sequence, enchaîne directement : Clic Catégorie -> Clic Modèle -> Clic Grille (Position 1) -> Clic Catégorie (ou Modèle) -> Clic Grille (Position 2), etc.\n"
-        "2. CÂBLAGE PACKET TRACER — RÈGLE OBLIGATOIRE ET DÉTERMINISTE :\n"
-        "   - Si nécessaire, clique d'abord sur la catégorie 'Connections' (éclair orange en haut du panneau en bas à gauche), puis prends une nouvelle capture.\n"
-        "   - L'outil à sélectionner est UNIQUEMENT l'icône de connexion automatique dans la rangée d'icônes située JUSTE AU-DESSUS du libellé exact 'Automatically Choose Connection Type'. Donne à auto_x/auto_y les coordonnées de cette icône, pas celles du texte. Ne clique JAMAIS sur un éclair sous la barre de recherche, ni sur un câble spécifique.\n"
-        "   - Quand plusieurs liaisons sont demandées et que les appareils sont visibles, appelle connect_multiple_devices UNE SEULE FOIS avec toutes les paires d'appareils dans l'ordre. N'utilise JAMAIS mouse_click_sequence, mouse_click ou drag_and_drop pour câbler.\n"
-        "   - L'outil connect_multiple_devices clique lui-même sur cette même icône Auto avant CHAQUE liaison, puis sur l'appareil A et l'appareil B.\n"
-        "3. TERMINAUX ET CLI (TOUT EQUIPEMENT OU APPLICATION) :\n"
-        "   - Quand une fenetre possede un terminal/CLI, clique dans sa zone de saisie avant d'envoyer du texte.\n"
-        "   - Si le terminal affiche 'Translating ...', appuie sur Ctrl+C pour interrompre la résolution.\n"
-        "Quand toute la tâche demandée est terminée et vérifiée, appelle finish_task."
-    )
-
-    messages = [{"role": "system", "content": consigne_base}]
-    scripts_injectes = False
-    consecutive_no_action = 0  # Compteur pour détecter si l'agent boucle sans agir
-    
-    # Mécanisme de détection de boucle : stocke les dernières actions identiques
-    last_action_signature = None
-    repeated_action_count = 0
-    
-    step = 1
-    while True:
-        if app_instance and app_instance.stop_requested:
-            if app_instance:
-                app_instance.log("🛑 Exécution arrêtée net par l'utilisateur.\n", "system")
-            break
-
-        if not scripts_injectes and app_instance and app_instance.shared_state.get("done") and app_instance.shared_state.get("data"):
-            messages[0]["content"] = consigne_base + (
-                f"\n\nIMPORTANT : Voici les scripts Cisco IOS générés en arrière-plan pour toi : "
-                f"{json.dumps(app_instance.shared_state['data'], ensure_ascii=False)}. "
-                "Utilise 'send_cisco_cli_block' (CLI Cisco) ou 'type_text' (PC/Windows) avec ces textes exacts."
-            )
-            app_instance.log("[Système] Scripts Cisco prêts et transmis à l'agent.\n", "system")
-            scripts_injectes = True
-
-        if app_instance:
-             app_instance.log(f"--- Étape {step} ---\n", "system")
+    prep_info = "Exécution directe."
+    if app_instance and hasattr(app_instance, "shared_state"):
+        s = app_instance.shared_state
+        if s.get("done") and s.get("data"):
+            prep_info = s["data"].get("hints", prep_info)
         else:
-             print(f"--- Étape {step} ---")
+            prep_info = prepare_task_data(task).get("hints", prep_info)
 
-        img_b64 = capture_screen()
-        
-        for msg in messages:
-            if isinstance(msg, dict) and msg.get("role") == "user" and isinstance(msg.get("content"), list):
-                msg["content"] = "[Capture d'écran de l'étape précédente archivée]"
-        
-        prompt_text = f"Tâche : {task}. Voici la capture actuelle de l'écran {CURRENT_MONITOR}. Analyse tous les éléments visibles et regroupe dans cette réponse toute la séquence fiable."
-        if consecutive_no_action > 0:
-            prompt_text += " ⚠️ AVERTISSEMENT CRITIQUE : Tu viens de réfléchir à voix haute sans utiliser d'outil. L'utilisateur NE PEUT PAS répondre à ton texte. Si tu as besoin d'une information, TU DOIS OBLIGATOIREMENT exécuter la fonction 'ask_human'. C'est un ordre."
+    log_msg(f"⚡ Modèle actif : {MODEL_LITE} (Mode Lite économique)\n", "system")
+
+    static_prefix = [
+        {"role": "system", "content": SYSTEM_PROMPT_LITE},
+        {
+            "role": "user",
+            "content": f"🎯 MISSION : {task}\n📌 CONSIGNES : {prep_info}\nExécute sans discours et appelle `finish_task` dès que l'action est faite.",
+        },
+    ]
+
+    history_logs: list[str] = []
+    unchanged_screen_count = 0
+    last_screen_hash = None
+
+    for step in range(1, max_steps + 1):
+        if app_instance and getattr(app_instance, "stop_requested", False):
+            log_msg("🛑 Mission interrompue.\n", "error")
+            return
+
+        b64_img, current_hash, _ = capture_screen(draw_cursor=True)
+        if last_screen_hash and current_hash == last_screen_hash:
+            unchanged_screen_count += 1
         else:
-            prompt_text += " Si tu es bloqué ou qu'il manque une info, appelle impérativement l'outil ask_human."
+            unchanged_screen_count = 0
+        last_screen_hash = current_hash
 
-        user_content = [
-            {"type": "text", "text": prompt_text},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
-        ]
-        messages.append({"role": "user", "content": user_content})
-        
+        loop_warning = ""
+        if unchanged_screen_count >= 3:
+            loop_warning = "\n⚠️ Écran inchangé : si la mission est finie, appelle IMMÉDIATEMENT `finish_task` sans recliquer."
+
+        messages = list(static_prefix)
+        if history_logs:
+            messages.append({"role": "assistant", "content": "Actions faites :\n" + "\n".join(history_logs[-8:])})
+
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"Étape {step}/{max_steps}. Prochaine action ?{loop_warning}"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}", "detail": "low"}},
+                ],
+            }
+        )
+
         try:
             response = client.chat.completions.create(
-                model="anthropic/claude-haiku-5.5",
+                model=MODEL_LITE,
                 messages=messages,
-                tools=tools,
-                tool_choice="auto"
+                tools=TOOLS_SCHEMA,
+                tool_choice="auto",
+                temperature=0.0,
+                max_tokens=600,
             )
         except Exception as e:
-            if app_instance:
-                app_instance.log(f"❌ Erreur API OpenRouter (Clé invalide ou crédit épuisé) : {e}\n", "error")
-                app_instance.log("🔑 Clique sur l'icône 🔑 en haut de la bulle pour changer de clé API.\n", "system")
-            return
-        
-        msg = response.choices[0].message
-        messages.append(msg)
-        
-        if msg.tool_calls:
-            consecutive_no_action = 0
-            for tool in msg.tool_calls:
-                # Vérification d'arrêt d'urgence avant chaque appel d'outil
-                if app_instance and app_instance.stop_requested:
-                    app_instance.log("🛑 Action annulée net par le bouton STOP.\n", "system")
-                    if hasattr(app_instance, 'agent_running'):
-                        app_instance.agent_running = False
-                    return
+            log_msg(f"❌ Erreur API Claude : {e}\n", "error")
+            time.sleep(1.5)
+            continue
 
-                fn_name = tool.function.name
-                fn_args = json.loads(tool.function.arguments)
-                
-                # --- DÉTECTION DE BOUCLE : Répétition de la même action 3 fois ---
-                # On ignore les actions légitimes répétitives comme wait
-                if fn_name != "wait":
-                    sig = f"{fn_name}:{json.dumps(fn_args, sort_keys=True)}"
-                    if sig == last_action_signature:
-                        repeated_action_count += 1
-                    else:
-                        last_action_signature = sig
-                        repeated_action_count = 1
-                    
-                    if repeated_action_count >= 3:
-                        msg_loop = (
-                            f"Je constate que je tente de faire la même action ({fn_name}) "
-                            f"pour la 3ème fois consécutive sans résultat probant. "
-                            f"Je m'arrête pour éviter de boucler. Que dois-je faire ?"
-                        )
-                        if app_instance:
-                            app_instance.log(f"⚠️ Détection de boucle infinie sur {fn_name}. Pause forcée.\n", "system")
-                        result = execute_action("ask_human", {"question": msg_loop}, app_instance)
-                        repeated_action_count = 0
-                        last_action_signature = None
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool.id,
-                            "content": result
-                        })
-                        continue
-                
-                # --- AFFICHAGE EN TEMPS RÉEL DE L'ACTION ---
-                if app_instance:
-                    app_instance.log(f"🛠️ Action : {fn_name} {fn_args}\n", "agent")
-                else:
-                    print(f"🛠️ Action : {fn_name} {fn_args}")
-                
-                result = execute_action(fn_name, fn_args, app_instance)
-                
-                if result == "FIN" or (app_instance and app_instance.stop_requested):
-                    if hasattr(app_instance, 'agent_running'):
-                        app_instance.agent_running = False
-                    return
-                
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool.id,
-                    "content": result
-                })
-        else:
-            consecutive_no_action += 1
-            if app_instance:
-                 app_instance.log(f"🧠 L'agent réfléchit (sans agir) : {msg.content}\n", "system")
-            else:
-                 print(f"🧠 L'agent réfléchit (sans agir) : {msg.content}")
-            
-        time.sleep(0.15)
-        step += 1
+        if app_instance and getattr(app_instance, "stop_requested", False):
+            return
+
+        msg = response.choices[0].message
+        tool_calls = getattr(msg, "tool_calls", None)
+
+        if not tool_calls:
+            txt = (msg.content or "").strip()
+            if txt:
+                log_msg(f"🤖 {txt}\n", "agent")
+                history_logs.append(f"Étape {step}: {txt[:90]}")
+            continue
+
+        for tc in tool_calls:
+            if app_instance and getattr(app_instance, "stop_requested", False):
+                return
+            fn = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except Exception:
+                args = {}
+
+            if fn == "finish_task":
+                log_msg(f"✅ Mission accomplie : {args.get('summary', 'Terminé')}\n", "system")
+                return
+
+            if fn == "ask_human":
+                q = args.get("question", "Précision nécessaire :")
+                log_msg(f"🤖 Question : {q}\n", "agent")
+                if app_instance and hasattr(app_instance, "wait_for_human"):
+                    app_instance.wait_for_human()
+                    if getattr(app_instance, "stop_requested", False):
+                        return
+                    reply = getattr(app_instance, "human_response", "").strip()
+                    log_msg("▶️ Reprise.\n", "system")
+                    history_logs.append(f"Q: '{q}' -> R: '{reply}'")
+                continue
+
+            log_msg(f"⚡ [{step}] {fn}({json.dumps(args, ensure_ascii=False)[:80]})\n", "agent")
+            res = execute_action(fn, args, app_instance=app_instance)
+            history_logs.append(f"{fn} => {res}")
+
+    log_msg("⚠️ Limite d'étapes atteinte.\n", "error")
