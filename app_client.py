@@ -1,313 +1,526 @@
+# -*- coding: utf-8 -*-
+"""
+app_client.py — Interface Client (Bulle flottante 🤖 + Connexion IP VM + Switch Terra/Lite + Sous-menu Clés API & OAuth)
+"""
+
+import os
 import json
 import socket
 import threading
 import tkinter as tk
-from tkinter import scrolledtext
+from tkinter import ttk, filedialog, messagebox
 
-class FloatingAssistantBubble:
-    def __init__(self, root):
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_config.json")
+DEFAULT_PORT = 65432
+
+
+class AgentClientApp:
+    def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Assistant IA")
-        self.root.configure(bg="#121212")
+        self.root.title("Assistant VM")
+        self.root.geometry("430x600")
+        self.root.configure(bg="#111827")
+        self.root.attributes("-topmost", True)
+        self.root.overrideredirect(True)  # Fenêtre sans bordure Windows classique pour style moderne
 
-        # Configuration réseau
-        self.sock = None
-        self.is_connected = False
-        self.vm_ip = "192.168.15.132"
-        self.port = 65432
+        # État réseau & configuration
+        self.sock: socket.socket | None = None
+        self.connected = False
+        self.engine_mode = "terra"  # "terra" ou "lite"
+        self.submenu_visible = False
+        self.is_minimized_to_bubble = False
 
-        # État et dimensions de l'interface
-        self.is_expanded = False
-        self.chat_width = 380
-        self.chat_height = 560
-        self.bubble_size = 60
-        self.margin = 25
+        # Coordonnées pour le glisser-déposer de la fenêtre et de la bulle
+        self._drag_x = 0
+        self._drag_y = 0
+        self._bubble_moved = False
 
-        # Position initiale de la bulle (bas droite)
-        screen_w = self.root.winfo_screenwidth()
-        screen_h = self.root.winfo_screenheight()
-        self.bubble_x = screen_w - self.bubble_size - self.margin
-        self.bubble_y = screen_h - self.bubble_size - self.margin - 40
+        # Chargement de la config locale (IP mémorisée, clés, etc.)
+        self.config = self.load_local_config()
 
-        # Variables internes pour le Drag & Drop
-        self._drag_start_x = 0
-        self._drag_start_y = 0
-        self._has_dragged = False
+        # Construction des interfaces
+        self._build_main_window()
+        self._build_floating_bubble()
 
-        # Fenêtre sans bordures Windows standard et toujours au premier plan
-        self.root.overrideredirect(True)
-        self.root.wm_attributes("-topmost", True)
+        # Connexion automatique au démarrage si une IP est déjà connue
+        if self.config.get("vm_ip"):
+            self.root.after(400, self.connect_to_vm)
 
-        self._build_ui()
-        self.collapse_chat()
-        self.connect_to_vm()
+    # ==========================================================================
+    # 1. GESTION DE LA CONFIGURATION LOCALE
+    # ==========================================================================
+    def load_local_config(self) -> dict:
+        default_cfg = {
+            "vm_ip": "192.168.1.100",
+            "port": DEFAULT_PORT,
+            "openrouter_key": "",
+            "mail_address": "",
+            "mail_password": "",
+            "oauth_token_or_path": "",
+            "extra_api_name": "Tavily / Google AI",
+            "extra_api_key": "",
+        }
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    default_cfg.update(data)
+            except Exception:
+                pass
+        return default_cfg
 
-    def _build_ui(self):
-        # 1. BULLE FLOTTANTE (Visible quand rétracté)
-        self.bubble_frame = tk.Frame(self.root, bg="#121212")
-        self.bubble_btn = tk.Label(
-            self.bubble_frame,
-            text="🤖",
-            bg="#2563eb",
-            fg="#ffffff",
-            font=("Segoe UI Emoji", 20),
-            cursor="fleur"
+    def save_local_config(self):
+        try:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.config, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"[Config] Erreur sauvegarde : {e}")
+
+    # ==========================================================================
+    # 2. CONSTRUCTION DE LA FENÊTRE PRINCIPALE
+    # ==========================================================================
+    def _build_main_window(self):
+        # --- BARRE DE TITRE PERSONNALISÉE ---
+        self.title_bar = tk.Frame(self.root, bg="#1f2937", height=36)
+        self.title_bar.pack(fill=tk.X, side=tk.TOP)
+
+        self.status_dot = tk.Label(self.title_bar, text="●", fg="#ef4444", bg="#1f2937", font=("Segoe UI", 12, "bold"))
+        self.status_dot.pack(side=tk.LEFT, padx=(10, 4))
+
+        self.title_label = tk.Label(
+            self.title_bar, text="Assistant VM", fg="#f9fafb", bg="#1f2937", font=("Segoe UI", 10, "bold")
         )
-        self.bubble_btn.pack(fill=tk.BOTH, expand=True)
-
-        # Événements de déplacement pour la bulle
-        self.bubble_btn.bind("<Button-1>", self._on_bubble_press)
-        self.bubble_btn.bind("<B1-Motion>", self._on_bubble_motion)
-        self.bubble_btn.bind("<ButtonRelease-1>", self._on_bubble_release)
-
-        # 2. FENÊTRE DE CHAT (Visible quand déplié)
-        self.chat_frame = tk.Frame(self.root, bg="#1e1e1e", bd=1, relief=tk.SOLID)
-
-        # En-tête : Titre, Statut, Clé API et Réduction
-        self.header = tk.Frame(self.chat_frame, bg="#252526", pady=8, padx=10, cursor="fleur")
-        self.header.pack(fill=tk.X)
-
-        # Permet aussi de déplacer la fenêtre de chat via l'en-tête
-        self.header.bind("<Button-1>", self._on_header_press)
-        self.header.bind("<B1-Motion>", self._on_header_motion)
-
-        self.title_label = tk.Label(self.header, text="Assistant VM", fg="#ffffff", bg="#252526", font=("Segoe UI", 10, "bold"))
         self.title_label.pack(side=tk.LEFT)
-        self.title_label.bind("<Button-1>", self._on_header_press)
-        self.title_label.bind("<B1-Motion>", self._on_header_motion)
 
-        close_btn = tk.Button(
-            self.header,
-            text="—",
-            fg="#cccccc",
-            bg="#252526",
-            activebackground="#3e3e42",
-            activeforeground="#ffffff",
-            bd=0,
-            font=("Segoe UI", 10, "bold"),
-            cursor="hand2",
-            command=self.collapse_chat
+        # Bouton fermeture complète
+        btn_close = tk.Button(
+            self.title_bar, text="✕", bg="#1f2937", fg="#9ca3af", bd=0,
+            activebackground="#dc2626", activeforeground="white", font=("Segoe UI", 10),
+            command=self.quit_app
         )
-        close_btn.pack(side=tk.RIGHT, padx=(5, 0))
+        btn_close.pack(side=tk.RIGHT, padx=(2, 8), pady=4)
 
-        # Bouton pour changer la clé API à tout moment
-        key_btn = tk.Button(
-            self.header,
-            text="🔑",
-            fg="#fde047",
-            bg="#252526",
-            activebackground="#3e3e42",
-            activeforeground="#ffffff",
-            bd=0,
-            font=("Segoe UI Emoji", 9),
-            cursor="hand2",
-            command=self.request_key_change
+        # Bouton réduction en bulle flottante 🤖
+        btn_min = tk.Button(
+            self.title_bar, text="—", bg="#1f2937", fg="#9ca3af", bd=0,
+            activebackground="#374151", activeforeground="white", font=("Segoe UI", 10, "bold"),
+            command=self.minimize_to_bubble
         )
-        key_btn.pack(side=tk.RIGHT, padx=(5, 5))
+        btn_min.pack(side=tk.RIGHT, padx=2, pady=4)
 
-        self.status_label = tk.Label(self.header, text="●", fg="#ff5555", bg="#252526", font=("Segoe UI", 11))
-        self.status_label.pack(side=tk.RIGHT)
-
-        # Zone centrale : Journal des logs
-        self.log_area = scrolledtext.ScrolledText(
-            self.chat_frame,
-            bg="#18181b",
-            fg="#e4e4e7",
-            insertbackground="white",
-            font=("Consolas", 9),
-            wrap=tk.WORD,
-            bd=0
+        # Bouton Sous-menu Clés API & OAuth
+        self.btn_submenu = tk.Button(
+            self.title_bar, text="🔗 Clés & OAuth", bg="#374151", fg="#e5e7eb", bd=0,
+            activebackground="#4b5563", activeforeground="white", font=("Segoe UI", 8, "bold"),
+            padx=8, pady=2, command=self.toggle_submenu
         )
-        self.log_area.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+        self.btn_submenu.pack(side=tk.RIGHT, padx=6, pady=5)
 
-        # Coloration
-        self.log_area.tag_config("system", foreground="#4ade80")
-        self.log_area.tag_config("agent", foreground="#67e8f9")
-        self.log_area.tag_config("user", foreground="#fde047")
-        self.log_area.tag_config("error", foreground="#f87171")
+        # Déplacement de la fenêtre via la barre de titre
+        for widget in (self.title_bar, self.title_label):
+            widget.bind("<ButtonPress-1>", self._start_window_drag)
+            widget.bind("<B1-Motion>", self._do_window_drag)
 
-        # Zone inférieure : Saisie & Boutons
-        bottom_box = tk.Frame(self.chat_frame, bg="#1e1e1e", padx=8, pady=8)
-        bottom_box.pack(fill=tk.X)
+        # --- BARRE D'ADRESSE IP DE LA VM + SWITCH MOTEUR (TERRA / LITE) ---
+        self.ip_bar = tk.Frame(self.root, bg="#182232", pady=6, padx=8)
+        self.ip_bar.pack(fill=tk.X, side=tk.TOP)
 
-        self.input_entry = tk.Entry(bottom_box, bg="#27272a", fg="#ffffff", insertbackground="white", font=("Segoe UI", 10), bd=1, relief=tk.FLAT)
-        self.input_entry.pack(fill=tk.X, pady=(0, 6), ipady=3)
+        tk.Label(self.ip_bar, text="IP VM :", fg="#9ca3af", bg="#182232", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT)
+
+        self.ip_var = tk.StringVar(value=self.config.get("vm_ip", "192.168.1.100"))
+        self.ip_entry = tk.Entry(
+            self.ip_bar, textvariable=self.ip_var, width=15,
+            bg="#0f172a", fg="#f8fafc", insertbackground="white",
+            relief=tk.FLAT, font=("Consolas", 9)
+        )
+        self.ip_entry.pack(side=tk.LEFT, padx=(6, 6), ipady=3)
+        self.ip_entry.bind("<Return>", lambda e: self.connect_to_vm())
+
+        self.btn_connect = tk.Button(
+            self.ip_bar, text="Connecter", bg="#2563eb", fg="white", bd=0,
+            activebackground="#1d4ed8", activeforeground="white",
+            font=("Segoe UI", 8, "bold"), padx=8, pady=3, command=self.connect_to_vm
+        )
+        self.btn_connect.pack(side=tk.LEFT, padx=(0, 8))
+
+        # Bouton Switch Mode Terra <-> Mode Lite (Claude Haiku 5.5)
+        self.btn_mode = tk.Button(
+            self.ip_bar, text="🚀 Mode: TERRA", bg="#059669", fg="white", bd=0,
+            activebackground="#047857", activeforeground="white",
+            font=("Segoe UI", 8, "bold"), padx=8, pady=3, command=self.toggle_engine_mode
+        )
+        self.btn_mode.pack(side=tk.RIGHT)
+
+        # --- SOUS-MENU REPLIABLE : CLÉS API, COMPTES MAILS & OAUTH ---
+        self.submenu_frame = tk.Frame(self.root, bg="#1e293b", padx=10, pady=8, highlightbackground="#334155", highlightthickness=1)
+        self._build_credentials_submenu()
+
+        # --- ZONE DE LOGS / CHAT ---
+        self.chat_frame = tk.Frame(self.root, bg="#111827", padx=8, pady=6)
+        self.chat_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.chat_box = tk.Text(
+            self.chat_frame, bg="#0b0f19", fg="#e5e7eb",
+            font=("Consolas", 9), wrap=tk.WORD, state=tk.DISABLED,
+            relief=tk.FLAT, padx=8, pady=8, insertbackground="white"
+        )
+        self.chat_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        scrollbar = tk.Scrollbar(self.chat_frame, command=self.chat_box.yview, bg="#1f2937", troughcolor="#0b0f19", bd=0)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.chat_box.config(yscrollcommand=scrollbar.set)
+
+        # Styles de couleurs des messages
+        self.chat_box.tag_config("system", foreground="#60a5fa")
+        self.chat_box.tag_config("agent", foreground="#a7f3d0")
+        self.chat_box.tag_config("user", foreground="#fde047")
+        self.chat_box.tag_config("error", foreground="#f87171")
+
+        # --- BARRE D'ENTRÉE ET BOUTONS D'ACTION EN BAS ---
+        self.bottom_frame = tk.Frame(self.root, bg="#1f2937", padx=8, pady=8)
+        self.bottom_frame.pack(fill=tk.X, side=tk.BOTTOM)
+
+        self.input_entry = tk.Entry(
+            self.bottom_frame, bg="#0f172a", fg="#f9fafb",
+            insertbackground="white", relief=tk.FLAT, font=("Segoe UI", 10)
+        )
+        self.input_entry.pack(fill=tk.X, pady=(0, 6), ipady=5)
         self.input_entry.bind("<Return>", lambda e: self.send_instruction())
 
-        btn_row = tk.Frame(bottom_box, bg="#1e1e1e")
+        btn_row = tk.Frame(self.bottom_frame, bg="#1f2937")
         btn_row.pack(fill=tk.X)
 
-        # Bouton STOP NET
-        self.stop_btn = tk.Button(
-            btn_row,
-            text="🛑 STOP",
-            bg="#dc2626",
-            fg="#ffffff",
-            activebackground="#991b1b",
-            activeforeground="#ffffff",
-            font=("Segoe UI", 9, "bold"),
-            relief=tk.FLAT,
-            bd=0,
-            cursor="hand2",
-            command=self.send_emergency_stop
+        self.btn_send = tk.Button(
+            btn_row, text="Envoyer", bg="#2563eb", fg="white", bd=0,
+            activebackground="#1d4ed8", activeforeground="white",
+            font=("Segoe UI", 9, "bold"), pady=5, command=self.send_instruction
         )
-        self.stop_btn.pack(side=tk.RIGHT, padx=(6, 0), ipadx=10, ipady=3)
+        self.btn_send.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
 
-        # Bouton Envoyer
-        self.send_btn = tk.Button(
-            btn_row,
-            text="Envoyer",
-            bg="#2563eb",
-            fg="#ffffff",
-            activebackground="#1d4ed8",
-            activeforeground="#ffffff",
-            font=("Segoe UI", 9, "bold"),
-            relief=tk.FLAT,
-            bd=0,
-            cursor="hand2",
-            command=self.send_instruction
+        self.btn_stop = tk.Button(
+            btn_row, text="🛑 STOP", bg="#dc2626", fg="white", bd=0,
+            activebackground="#b91c1c", activeforeground="white",
+            font=("Segoe UI", 9, "bold"), padx=14, pady=5, command=self.send_stop
         )
-        self.send_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=3)
+        self.btn_stop.pack(side=tk.RIGHT)
 
-    # --- LOGIQUE DE GLISSER-DÉPOSER (DRAG & DROP) ---
-    def _on_bubble_press(self, event):
-        self._drag_start_x = event.x_root
-        self._drag_start_y = event.y_root
-        self._has_dragged = False
+    # ==========================================================================
+    # 3. SOUS-MENU : CLÉS API, MAILS & OAUTH 2.0
+    # ==========================================================================
+    def _build_credentials_submenu(self):
+        tk.Label(
+            self.submenu_frame, text="🔐 GESTIONNAIRE DE CLÉS API, COMPTES & OAUTH",
+            fg="#38bdf8", bg="#1e293b", font=("Segoe UI", 9, "bold")
+        ).pack(anchor="w", pady=(0, 6))
 
-    def _on_bubble_motion(self, event):
-        dx = event.x_root - self._drag_start_x
-        dy = event.y_root - self._drag_start_y
+        grid = tk.Frame(self.submenu_frame, bg="#1e293b")
+        grid.pack(fill=tk.X)
 
+        # 1. Clé API OpenRouter
+        tk.Label(grid, text="OpenRouter Key :", fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w", pady=2)
+        self.var_or_key = tk.StringVar(value=self.config.get("openrouter_key", ""))
+        tk.Entry(grid, textvariable=self.var_or_key, show="*", bg="#0f172a", fg="white", relief=tk.FLAT, width=32).grid(row=0, column=1, columnspan=2, sticky="ew", padx=4, pady=2)
+
+        # 2. Compte Mail / Microsoft 365 / Google (Identifiant + Mot de passe)
+        tk.Label(grid, text="Email / Compte :", fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8)).grid(row=1, column=0, sticky="w", pady=2)
+        self.var_mail_user = tk.StringVar(value=self.config.get("mail_address", ""))
+        tk.Entry(grid, textvariable=self.var_mail_user, bg="#0f172a", fg="white", relief=tk.FLAT, width=32).grid(row=1, column=1, columnspan=2, sticky="ew", padx=4, pady=2)
+
+        tk.Label(grid, text="Mot de passe :", fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8)).grid(row=2, column=0, sticky="w", pady=2)
+        self.var_mail_pass = tk.StringVar(value=self.config.get("mail_password", ""))
+        tk.Entry(grid, textvariable=self.var_mail_pass, show="*", bg="#0f172a", fg="white", relief=tk.FLAT, width=32).grid(row=2, column=1, columnspan=2, sticky="ew", padx=4, pady=2)
+
+        # 3. Fichier ou Token OAuth 2.0 (Google / Outlook / Custom)
+        tk.Label(grid, text="OAuth JSON/Token :", fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8)).grid(row=3, column=0, sticky="w", pady=2)
+        self.var_oauth = tk.StringVar(value=self.config.get("oauth_token_or_path", ""))
+        tk.Entry(grid, textvariable=self.var_oauth, bg="#0f172a", fg="white", relief=tk.FLAT, width=23).grid(row=3, column=1, sticky="ew", padx=4, pady=2)
+        tk.Button(
+            grid, text="📂", bg="#334155", fg="white", bd=0, padx=6,
+            command=self._browse_oauth_file
+        ).grid(row=3, column=2, sticky="e", padx=2)
+
+        # 4. Clé API tierce (Tavily, Google AI, etc.)
+        tk.Label(grid, text="Autre Clé API :", fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8)).grid(row=4, column=0, sticky="w", pady=2)
+        self.var_extra_key = tk.StringVar(value=self.config.get("extra_api_key", ""))
+        tk.Entry(grid, textvariable=self.var_extra_key, show="*", bg="#0f172a", fg="white", relief=tk.FLAT, width=32).grid(row=4, column=1, columnspan=2, sticky="ew", padx=4, pady=2)
+
+        grid.columnconfigure(1, weight=1)
+
+        # Boutons d'action du sous-menu
+        actions_bar = tk.Frame(self.submenu_frame, bg="#1e293b")
+        actions_bar.pack(fill=tk.X, pady=(8, 0))
+
+        tk.Button(
+            actions_bar, text="💾 Enregistrer & Synchroniser vers la VM",
+            bg="#0284c7", fg="white", bd=0, activebackground="#0369a1", activeforeground="white",
+            font=("Segoe UI", 8, "bold"), pady=4, command=self.save_and_sync_credentials
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+
+        tk.Button(
+            actions_bar, text="📎 Injecter mes identifiants dans le prompt",
+            bg="#4f46e5", fg="white", bd=0, activebackground="#4338ca", activeforeground="white",
+            font=("Segoe UI", 8, "bold"), padx=8, pady=4, command=self.inject_credentials_into_input
+        ).pack(side=tk.RIGHT)
+
+    def _browse_oauth_file(self):
+        path = filedialog.askopenfilename(
+            title="Sélectionner un fichier OAuth JSON (client_secret / token)",
+            filetypes=[("Fichiers JSON", "*.json"), ("Tous les fichiers", "*.*")]
+        )
+        if path:
+            self.var_oauth.set(path)
+
+    def toggle_submenu(self):
+        if self.submenu_visible:
+            self.submenu_frame.pack_forget()
+            self.submenu_visible = False
+            self.btn_submenu.config(bg="#374151")
+        else:
+            self.submenu_frame.pack(fill=tk.X, after=self.ip_bar)
+            self.submenu_visible = True
+            self.btn_submenu.config(bg="#0284c7")
+
+    def save_and_sync_credentials(self):
+        self.config["openrouter_key"] = self.var_or_key.get().strip()
+        self.config["mail_address"] = self.var_mail_user.get().strip()
+        self.config["mail_password"] = self.var_mail_pass.get().strip()
+        self.config["oauth_token_or_path"] = self.var_oauth.get().strip()
+        self.config["extra_api_key"] = self.var_extra_key.get().strip()
+        self.save_local_config()
+
+        # Lecture éventuelle du contenu JSON OAuth si c'est un fichier local sur le PC hôte
+        oauth_val = self.config["oauth_token_or_path"]
+        oauth_json_content = ""
+        if oauth_val and os.path.exists(oauth_val):
+            try:
+                with open(oauth_val, "r", encoding="utf-8") as f:
+                    oauth_json_content = f.read()
+            except Exception:
+                pass
+
+        payload = {
+            "type": "sync_credentials",
+            "openrouter_key": self.config["openrouter_key"],
+            "mail_address": self.config["mail_address"],
+            "mail_password": self.config["mail_password"],
+            "oauth_raw": oauth_json_content or oauth_val,
+            "extra_api_key": self.config["extra_api_key"],
+        }
+
+        if self.connected and self.sock:
+            self._send_json(payload)
+            self.append_log("🔐 Clés API & identifiants synchronisés avec la VM.\n", "system")
+        else:
+            self.append_log("💾 Clés sauvegardées localement (connecte-toi à la VM pour les synchroniser).\n", "system")
+
+    def inject_credentials_into_input(self):
+        """Ajoute rapidement le mail et le mot de passe enregistrés dans le champ d'instruction."""
+        mail = self.var_mail_user.get().strip()
+        pwd = self.var_mail_pass.get().strip()
+        if not mail and not pwd:
+            self.append_log("⚠️ Remplis d'abord l'Email et le Mot de passe dans le sous-menu.\n", "error")
+            return
+        current = self.input_entry.get().strip()
+        addition = f" (Utilise le compte '{mail}' et le mot de passe '{pwd}')"
+        self.input_entry.delete(0, tk.END)
+        self.input_entry.insert(0, (current + addition).strip())
+        self.input_entry.focus_set()
+
+    # ==========================================================================
+    # 4. BULLE FLOTTANTE DÉPLAÇABLE "🤖"
+    # ==========================================================================
+    def _build_floating_bubble(self):
+        self.bubble_win = tk.Toplevel(self.root)
+        self.bubble_win.withdraw()
+        self.bubble_win.overrideredirect(True)
+        self.bubble_win.attributes("-topmost", True)
+        self.bubble_win.geometry("56x56+100+100")
+        self.bubble_win.configure(bg="#2563eb")
+
+        lbl = tk.Label(
+            self.bubble_win, text="🤖", font=("Segoe UI Emoji", 22),
+            bg="#2563eb", fg="white", cursor="hand2"
+        )
+        lbl.pack(fill=tk.BOTH, expand=True)
+
+        lbl.bind("<ButtonPress-1>", self._start_bubble_drag)
+        lbl.bind("<B1-Motion>", self._do_bubble_drag)
+        lbl.bind("<ButtonRelease-1>", self._release_bubble)
+
+    def minimize_to_bubble(self):
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        self.root.withdraw()
+        self.bubble_win.geometry(f"56x56+{x}+{y}")
+        self.bubble_win.deiconify()
+        self.is_minimized_to_bubble = True
+
+    def restore_from_bubble(self):
+        x, y = self.bubble_win.winfo_x(), self.bubble_win.winfo_y()
+        self.bubble_win.withdraw()
+        self.root.geometry(f"+{x}+{y}")
+        self.root.deiconify()
+        self.is_minimized_to_bubble = False
+
+    def _start_bubble_drag(self, event):
+        self._drag_x = event.x
+        self._drag_y = event.y
+        self._bubble_moved = False
+
+    def _do_bubble_drag(self, event):
+        dx = event.x - self._drag_x
+        dy = event.y - self._drag_y
         if abs(dx) > 3 or abs(dy) > 3:
-            self._has_dragged = True
+            self._bubble_moved = True
+        x = self.bubble_win.winfo_x() + dx
+        y = self.bubble_win.winfo_y() + dy
+        self.bubble_win.geometry(f"+{x}+{y}")
 
-        self.bubble_x += dx
-        self.bubble_y += dy
-        self.root.geometry(f"{self.bubble_size}x{self.bubble_size}+{self.bubble_x}+{self.bubble_y}")
-        self._drag_start_x = event.x_root
-        self._drag_start_y = event.y_root
+    def _release_bubble(self, event):
+        if not self._bubble_moved:
+            self.restore_from_bubble()
 
-    def _on_bubble_release(self, event):
-        if not self._has_dragged:
-            self.expand_chat()
+    def _start_window_drag(self, event):
+        self._drag_x = event.x
+        self._drag_y = event.y
 
-    def _on_header_press(self, event):
-        self._chat_drag_x = event.x_root - self.root.winfo_x()
-        self._chat_drag_y = event.y_root - self.root.winfo_y()
+    def _do_window_drag(self, event):
+        x = self.root.winfo_x() + (event.x - self._drag_x)
+        y = self.root.winfo_y() + (event.y - self._drag_y)
+        self.root.geometry(f"+{x}+{y}")
 
-    def _on_header_motion(self, event):
-        new_x = event.x_root - self._chat_drag_x
-        new_y = event.y_root - self._chat_drag_y
-        self.root.geometry(f"{self.chat_width}x{self.chat_height}+{new_x}+{new_y}")
-        self.bubble_x = new_x + self.chat_width - self.bubble_size
-        self.bubble_y = new_y + self.chat_height - self.bubble_size
-
-    # --- DÉPLOIEMENT / RÉDUCTION DU CHAT ---
-    def expand_chat(self):
-        screen_w = self.root.winfo_screenwidth()
-        screen_h = self.root.winfo_screenheight()
-
-        x = self.bubble_x + self.bubble_size - self.chat_width
-        y = self.bubble_y + self.bubble_size - self.chat_height
-
-        x = max(10, min(x, screen_w - self.chat_width - 10))
-        y = max(10, min(y, screen_h - self.chat_height - 40))
-
-        self.bubble_frame.pack_forget()
-        self.chat_frame.pack(fill=tk.BOTH, expand=True)
-        self.root.geometry(f"{self.chat_width}x{self.chat_height}+{x}+{y}")
-        self.is_expanded = True
-
-    def collapse_chat(self):
-        self.chat_frame.pack_forget()
-        self.bubble_frame.pack(fill=tk.BOTH, expand=True)
-        self.root.geometry(f"{self.bubble_size}x{self.bubble_size}+{self.bubble_x}+{self.bubble_y}")
-        self.is_expanded = False
-
-    def log(self, text, tag="system"):
-        self.log_area.insert(tk.END, text, tag)
-        self.log_area.see(tk.END)
-
-        triggers = ["🤖 l'agent a besoin d'aide", "mission accomplie", "✅", "⚠️ détection de boucle", "🔑"]
-        if any(trig in text.lower() for trig in triggers):
-            if not self.is_expanded:
-                self.root.after(0, self.expand_chat)
-
+    # ==========================================================================
+    # 5. COMMUNICATION RÉSEAU TCP AVEC LA VM & BASCULE TERRA / LITE
+    # ==========================================================================
     def connect_to_vm(self):
-        def _connect():
+        ip = self.ip_var.get().strip()
+        if not ip:
+            self.append_log("⚠️ Entre d'abord l'adresse IP de la VM.\n", "error")
+            return
+
+        self.config["vm_ip"] = ip
+        self.save_local_config()
+
+        if self.sock:
             try:
-                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.sock.connect((self.vm_ip, self.port))
-                self.is_connected = True
-                self.status_label.config(fg="#4ade80")
-                self.log("✅ Connecté au serveur VM.\n", "system")
-                threading.Thread(target=self._listen_vm, daemon=True).start()
+                self.sock.close()
+            except Exception:
+                pass
+            self.sock = None
+            self.connected = False
+
+        self.append_log(f"🔄 Connexion à la VM ({ip}:{DEFAULT_PORT})...\n", "system")
+
+        def _connect_thread():
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(5.0)
+                s.connect((ip, DEFAULT_PORT))
+                s.settimeout(None)
+                self.sock = s
+                self.connected = True
+                self.root.after(0, lambda: self._update_connection_ui(True))
+
+                # Synchronisation automatique du mode et de la clé API si présente
+                self._send_json({"type": "set_mode", "mode": self.engine_mode})
+                if self.config.get("openrouter_key"):
+                    self.save_and_sync_credentials()
+
+                self._listen_loop()
             except Exception as e:
-                self.status_label.config(fg="#f87171")
-                self.log(f"Erreur de connexion : {e}\n", "error")
+                self.connected = False
+                self.root.after(0, lambda: self._update_connection_ui(False))
+                self.root.after(0, lambda err=e: self.append_log(f"❌ Échec de connexion à {ip} : {err}\n", "error"))
 
-        threading.Thread(target=_connect, daemon=True).start()
+        threading.Thread(target=_connect_thread, daemon=True).start()
 
-    def _listen_vm(self):
+    def _update_connection_ui(self, is_connected: bool):
+        if is_connected:
+            self.status_dot.config(fg="#10b981")
+            self.btn_connect.config(text="Reconnecter", bg="#374151")
+        else:
+            self.status_dot.config(fg="#ef4444")
+            self.btn_connect.config(text="Connecter", bg="#2563eb")
+
+    def toggle_engine_mode(self):
+        if self.engine_mode == "terra":
+            self.engine_mode = "lite"
+            self.btn_mode.config(text="⚡ Mode: LITE (Claude)", bg="#7c3aed", activebackground="#6d28d9")
+        else:
+            self.engine_mode = "terra"
+            self.btn_mode.config(text="🚀 Mode: TERRA", bg="#059669", activebackground="#047857")
+
+        if self.connected and self.sock:
+            self._send_json({"type": "set_mode", "mode": self.engine_mode})
+        else:
+            self.append_log(f"⚙️ Mode sélectionné localement : {self.engine_mode.upper()}\n", "system")
+
+    def _send_json(self, payload: dict):
+        if not self.connected or not self.sock:
+            self.append_log("⚠️ Non connecté à la VM. Clique sur 'Connecter'.\n", "error")
+            return False
+        try:
+            raw = json.dumps(payload, ensure_ascii=False) + "\n"
+            self.sock.sendall(raw.encode("utf-8"))
+            return True
+        except Exception as e:
+            self.append_log(f"❌ Erreur d'envoi réseau : {e}\n", "error")
+            self.connected = False
+            self._update_connection_ui(False)
+            return False
+
+    def send_instruction(self):
+        text = self.input_entry.get().strip()
+        if not text:
+            return
+        self.input_entry.delete(0, tk.END)
+        self.append_log(f"👤 {text}\n", "user")
+        self._send_json({"type": "instruction", "content": text})
+
+    def send_stop(self):
+        self._send_json({"type": "stop"})
+
+    def _listen_loop(self):
         buffer = ""
-        while self.is_connected:
+        while self.connected and self.sock:
             try:
-                chunk = self.sock.recv(4096).decode("utf-8")
-                if not chunk:
+                data = self.sock.recv(4096)
+                if not data:
                     break
-                buffer += chunk
+                buffer += data.decode("utf-8", errors="replace")
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
                     if not line.strip():
                         continue
-                    data = json.loads(line)
-                    text = data.get("text", "")
-                    tag = data.get("tag", "system")
-                    self.root.after(0, self.log, text, tag)
+                    try:
+                        msg = json.loads(line)
+                        txt = msg.get("text", "")
+                        tag = msg.get("tag", "system")
+                        self.root.after(0, lambda t=txt, tg=tag: self.append_log(t, tg))
+                    except Exception:
+                        self.root.after(0, lambda l=line: self.append_log(l + "\n", "system"))
             except Exception:
                 break
 
-        self.is_connected = False
-        self.status_label.config(fg="#f87171")
-        self.root.after(0, self.log, "Connexion perdue.\n", "error")
+        self.connected = False
+        self.root.after(0, lambda: self._update_connection_ui(False))
+        self.root.after(0, lambda: self.append_log("⚠️ Déconnecté du serveur VM.\n", "error"))
 
-    def send_instruction(self):
-        text = self.input_entry.get().strip()
-        if not text or not self.is_connected:
-            return
+    def append_log(self, text: str, tag: str = "system"):
+        self.chat_box.config(state=tk.NORMAL)
+        self.chat_box.insert(tk.END, text, tag)
+        self.chat_box.see(tk.END)
+        self.chat_box.config(state=tk.DISABLED)
 
-        payload = {"type": "instruction", "content": text}
+    def quit_app(self):
         try:
-            self.sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
-            if text.startswith("sk-or-"):
-                self.log("👤 [Clé API envoyée et masquée]\n\n", "user")
-            else:
-                self.log(f"👤 {text}\n\n", "user")
-            self.input_entry.delete(0, tk.END)
-        except Exception as e:
-            self.log(f"Erreur d'envoi : {e}\n", "error")
+            if self.sock:
+                self.sock.close()
+        except Exception:
+            pass
+        self.root.destroy()
 
-    def request_key_change(self):
-        if not self.is_connected:
-            return
-        payload = {"type": "reset_key"}
-        try:
-            self.sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
-        except Exception as e:
-            self.log(f"Erreur : {e}\n", "error")
-
-    def send_emergency_stop(self):
-        if not self.is_connected:
-            return
-        payload = {"type": "stop"}
-        try:
-            self.sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
-            self.log("🛑 ORDRE DE STOP IMMÉDIAT ENVOYÉ.\n", "error")
-        except Exception as e:
-            self.log(f"Erreur lors de l'arrêt : {e}\n", "error")
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = FloatingAssistantBubble(root)
+    app = AgentClientApp(root)
     root.mainloop()
