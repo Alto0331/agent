@@ -389,7 +389,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "write_clipboard",
-            "description": "Copie un long bloc de texte ou un tableau formaté (colonnes séparées par \t, lignes par \n pour Excel/Word) dans le presse-papiers et le colle proprement.",
+            "description": "Copie un long bloc de texte ou un tableau formaté (colonnes séparées par \\t, lignes par \\n pour Excel/Word) dans le presse-papiers et le colle proprement.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -477,13 +477,13 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "send_cisco_cli_block",
-            "description": "Tape manuellement un bloc de commandes IOS dans le terminal CLI de Cisco Packet Tracer (immunisé contre les bugs AZERTY/QWERTY). Sépare les commandes par des sauts de ligne \n.",
+            "description": "Tape manuellement un bloc de commandes IOS dans le terminal CLI de Cisco Packet Tracer (immunisé contre les bugs AZERTY/QWERTY). Sépare les commandes par des sauts de ligne \\n.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "commands": {
                         "type": "string",
-                        "description": "Commandes Cisco IOS séparées par \n (ex: 'enable\nconf t\nhostname SW1\nint fa0/1\nswitchport mode access\nno shut').",
+                        "description": "Commandes Cisco IOS séparées par \\n (ex: 'enable\\nconf t\\nhostname SW1\\nint fa0/1\\nswitchport mode access\\nno shut').",
                     },
                 },
                 "required": ["commands"],
