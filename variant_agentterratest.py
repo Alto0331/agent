@@ -11,6 +11,8 @@ Optimisations intégrées :
 4. Saisie Bureautique (Word, Excel, Brave) par bloc Presse-Papiers Unicode -> Orthographe, accents et mise en page intacts.
 5. Saisie Cisco Packet Tracer CLI par injection Unicode bas niveau (Win32 SendInput KEYEVENTF_UNICODE) ->
    Frappe manuelle fluide dans l'IOS Cisco sans jamais dépendre du clavier AZERTY/QWERTY ni provoquer de ^V.
+6. Édition PDF native via PyMuPDF (fitz) -> Inspection, remplissage de formulaires AcroForm, remplacement de texte
+   et insertion d'images/signatures au pixel près sans détruire la mise en page dans Docs/Word.
 """
 
 import os
@@ -29,6 +31,16 @@ import pyautogui
 import pygetwindow as gw
 import pyperclip
 from openai import OpenAI
+
+# Importation de PyMuPDF (fitz) avec installation automatique silencieuse si absent sur la VM
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "pymupdf", "--quiet"])
+        import fitz
+    except Exception:
+        fitz = None
 
 # Configuration PyAutoGUI sécurisée et réactive
 pyautogui.FAILSAFE = False
@@ -274,6 +286,12 @@ La capture d'écran que tu reçois fait exactement {VISION_TARGET_WIDTH}x{VISION
    - Dans Excel : pour remplir plusieurs cellules d'un coup, prépare les lignes avec des tabulations `\t` entre les colonnes et `\n` entre les lignes, puis utilise `write_clipboard(text=..., paste=True)`.
 4. NAVIGATION WEB : Privilégie toujours le navigateur Brave (`open_app_or_url` avec l'URL ou `brave`) pour éviter les pop-ups.
 
+🟣 RÈGLES D'ÉDITION DE FICHIERS PDF (PYMUPDF / FITZ) :
+- N'ouvre JAMAIS un fichier PDF dans Google Docs ou Word pour le modifier (cela détruit la mise en page).
+- Utilise TOUJOURS l'outil `edit_pdf` :
+  1. Appelle d'abord `edit_pdf(action="inspect", pdf_path="...")` pour lister les champs de formulaire interactifs, le texte existant et leurs coordonnées exactes `(x0, y0, x1, y1)`.
+  2. Appelle ensuite `edit_pdf(action="modify", ...)` pour remplir les champs (`form_fields`), remplacer du texte (`replacements`), insérer du texte à des coordonnées précises (`insert_texts`) ou apposer une image/signature (`insert_images`).
+
 🔵 RÈGLES SPÉCIFIQUES CISCO PACKET TRACER :
 1. Pour configurer un routeur ou un switch en ligne de commande (onglet CLI), clique d'abord dans la zone blanche/noire du terminal CLI pour lui donner le focus, puis utilise EXCLUSIVEMENT `send_cisco_cli_block`.
 2. `send_cisco_cli_block` tape les commandes manuellement en Unicode pur sans aucun bug AZERTY/QWERTY et gère automatiquement `enable` et `no ip domain-lookup`.
@@ -281,7 +299,7 @@ La capture d'écran que tu reçois fait exactement {VISION_TARGET_WIDTH}x{VISION
 
 🟡 GESTION DES BLOCAGES ET FIN DE MISSION IMMÉDIATE :
 - Si une fenêtre de connexion, un CAPTCHA, un mot de passe inconnu ou une ambiguïté critique bloque la mission, appelle `ask_human`.
-- INTERDICTION DE VÉRIFIER EN BOUCLE : Dès que tu as effectué les actions demandées par l'utilisateur (ex: épingler une application, valider un formulaire, saisir un texte), appelle IMMÉDIATEMENT `finish_task`.
+- INTERDICTION DE VÉRIFIER EN BOUCLE : Dès que tu as effectué les actions demandées par l'utilisateur (ex: épingler une application, valider un formulaire, saisir un texte, modifier un PDF), appelle IMMÉDIATEMENT `finish_task`.
 - Ne fais JAMAIS de clics supplémentaires (ni clic gauche, ni clic droit, ni double-clic) pour "vérifier" ou "contrôler" ton propre travail après coup. Fais confiance à tes actions et termine la mission dès la dernière action exécutée.
 """
 
@@ -380,6 +398,78 @@ TOOLS_SCHEMA = [
                     "press_enter": {"type": "boolean", "default": False},
                 },
                 "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_pdf",
+            "description": "Inspecte ou modifie directement un fichier PDF local via PyMuPDF (fitz) en conservant 100% de la mise en page d'origine (formulaires AcroForm, remplacement de texte exact, ajout de texte ou de signature/image).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["inspect", "modify"],
+                        "description": "'inspect' pour lire la structure/champs/coordonnées du PDF, 'modify' pour appliquer les modifications.",
+                    },
+                    "pdf_path": {
+                        "type": "string",
+                        "description": "Chemin du fichier PDF source (ex: 'C:\\Users\\Utilisateur\\Downloads\\contrat.pdf' ou '~/Downloads/doc.pdf').",
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "Chemin de sauvegarde du PDF modifié (si omis ou identique à pdf_path, écrase/met à jour le fichier d'origine).",
+                    },
+                    "form_fields": {
+                        "type": "object",
+                        "description": "Dictionnaire {nom_du_champ: valeur} pour remplir les champs de formulaire PDF interactifs.",
+                    },
+                    "replacements": {
+                        "type": "array",
+                        "description": "Liste de remplacements de texte [{'search': 'ancien texte', 'replace': 'nouveau texte', 'fontsize': 11}].",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "search": {"type": "string"},
+                                "replace": {"type": "string"},
+                                "fontsize": {"type": "number"},
+                                "page": {"type": "integer", "description": "Numéro de page (0-indexé, optionnel)."},
+                            },
+                            "required": ["search", "replace"],
+                        },
+                    },
+                    "insert_texts": {
+                        "type": "array",
+                        "description": "Liste de textes à insérer [{'page': 0, 'x': 100, 'y': 200, 'text': 'Contenu', 'fontsize': 11}].",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "page": {"type": "integer", "default": 0},
+                                "x": {"type": "number"},
+                                "y": {"type": "number"},
+                                "text": {"type": "string"},
+                                "fontsize": {"type": "number", "default": 11},
+                            },
+                            "required": ["x", "y", "text"],
+                        },
+                    },
+                    "insert_images": {
+                        "type": "array",
+                        "description": "Liste d'images/signatures à apposer [{'page': 0, 'rect': [x0, y0, x1, y1], 'image_path': 'C:\\...\\sig.png'}].",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "page": {"type": "integer", "default": 0},
+                                "rect": {"type": "array", "items": {"type": "number"}, "description": "[x0, y0, x1, y1] en points PDF"},
+                                "image_path": {"type": "string"},
+                            },
+                            "required": ["rect", "image_path"],
+                        },
+                    },
+                },
+                "required": ["action", "pdf_path"],
             },
         },
     },
@@ -525,7 +615,7 @@ TOOLS_SCHEMA = [
 def prepare_task_data(task: str) -> dict:
     """
     Fonction appelée en tâche de fond par agent_server.py au lancement d'une instruction.
-    Détecte le profil de la tâche (Cisco, Excel/Word, Web) pour injecter des rappels ciblés
+    Détecte le profil de la tâche (Cisco, PDF, Excel/Word, Web) pour injecter des rappels ciblés
     sans alourdir les appels réseau.
     """
     t_low = task.lower()
@@ -535,6 +625,11 @@ def prepare_task_data(task: str) -> dict:
         hints.append(
             "MODE CISCO DÉTECTÉ : Utilise `send_cisco_cli_block` dès que la fenêtre CLI d'un équipement est ouverte et active. "
             "Ne tente jamais de Ctrl+V dans l'IOS Cisco."
+        )
+    if any(k in t_low for k in ["pdf", "formulaire", "cerfa", "contrat", "facture", "signer", "signature", "remplir"]):
+        hints.append(
+            "MODE PDF DÉTECTÉ : N'ouvre JAMAIS le PDF dans Google Docs ou Word ! Utilise l'outil `edit_pdf` "
+            "(d'abord `action='inspect'` pour voir les champs et coordonnées, puis `action='modify'` pour remplir/remplacer proprement)."
         )
     if any(k in t_low for k in ["excel", "tableau", "cellule", "colonne", "formule", "tableur"]):
         hints.append(
@@ -555,7 +650,7 @@ def prepare_task_data(task: str) -> dict:
 
 
 # ==============================================================================
-# 5. EXÉCUTEUR D'ACTIONS (FLUIDE, ROBUSTE & IMMUNISÉ AZERTY/QWERTY)
+# 5. EXÉCUTEUR D'ACTIONS (FLUIDE, ROBUSTE, PYMUPDF & IMMUNISÉ AZERTY/QWERTY)
 # ==============================================================================
 def _find_brave_exe() -> str | None:
     brave_paths = [
@@ -567,6 +662,180 @@ def _find_brave_exe() -> str | None:
         if os.path.exists(p):
             return p
     return None
+
+
+def _resolve_pdf_path(raw_path: str) -> str:
+    """Résout intelligemment le chemin d'un fichier PDF sur la VM (Bureau, Téléchargements, Documents)."""
+    expanded = os.path.expanduser(os.path.expandvars(raw_path.strip().strip('"').strip("'")))
+    if os.path.exists(expanded):
+        return os.path.abspath(expanded)
+
+    # Si seul le nom du fichier est fourni, cherche dans les dossiers courants de l'utilisateur
+    filename = os.path.basename(expanded)
+    user_profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
+    search_dirs = [
+        os.path.join(user_profile, "Downloads"),
+        os.path.join(user_profile, "Desktop"),
+        os.path.join(user_profile, "Documents"),
+        os.path.join(user_profile, "OneDrive", "Desktop"),
+        os.path.join(user_profile, "OneDrive", "Documents"),
+        os.getcwd(),
+    ]
+    for d in search_dirs:
+        candidate = os.path.join(d, filename)
+        if os.path.exists(candidate):
+            return os.path.abspath(candidate)
+    return expanded
+
+
+def _handle_edit_pdf(args: dict) -> str:
+    """Gère l'inspection et la modification chirurgicale de fichiers PDF via PyMuPDF (fitz)."""
+    if fitz is None:
+        return "Erreur : La bibliothèque PyMuPDF (fitz) n'est pas installée. Lance `pip install pymupdf`."
+
+    action = str(args.get("action", "inspect")).lower()
+    pdf_path = _resolve_pdf_path(args.get("pdf_path", ""))
+
+    if not os.path.exists(pdf_path):
+        return f"Erreur : Fichier PDF introuvable au chemin '{pdf_path}'."
+
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception as e:
+        return f"Erreur d'ouverture du PDF '{pdf_path}' : {e}"
+
+    try:
+        if action == "inspect":
+            report = [f"📄 PDF : {pdf_path} ({len(doc)} page(s))"]
+            for p_idx in range(min(len(doc), 8)):
+                page = doc[p_idx]
+                rect = page.rect
+                report.append(f"--- Page {p_idx} (Dimensions: {int(rect.width)}x{int(rect.height)} pts) ---")
+
+                # 1. Champs de formulaire interactifs (AcroForm)
+                widgets = list(page.widgets() or [])
+                if widgets:
+                    report.append("  [Champs de formulaire interactifs] :")
+                    for w in widgets[:40]:
+                        r = w.rect
+                        report.append(
+                            f"    - Nom='{w.field_name}' | Type={w.field_type_string} | "
+                            f"Valeur='{w.field_value}' | Rect=[{int(r.x0)}, {int(r.y0)}, {int(r.x1)}, {int(r.y1)}]"
+                        )
+
+                # 2. Lignes de texte avec coordonnées pour repérage
+                blocks = page.get_text("blocks")
+                if blocks:
+                    report.append("  [Blocs de texte (x0, y0, x1, y1)] :")
+                    for b in blocks[:35]:
+                        txt_clean = " ".join(str(b[4]).splitlines()).strip()
+                        if txt_clean:
+                            report.append(f"    - [{int(b[0])}, {int(b[1])}, {int(b[2])}, {int(b[3])}] : {txt_clean[:90]}")
+
+            doc.close()
+            return "\n".join(report)
+
+        elif action == "modify":
+            changes_log = []
+
+            # 1. Remplissage des champs de formulaire AcroForm
+            form_fields = args.get("form_fields") or {}
+            if isinstance(form_fields, dict) and form_fields:
+                filled_count = 0
+                for page in doc:
+                    for widget in page.widgets() or []:
+                        if widget.field_name in form_fields:
+                            val = form_fields[widget.field_name]
+                            widget.field_value = str(val) if not isinstance(val, bool) else val
+                            widget.update()
+                            filled_count += 1
+                changes_log.append(f"{filled_count} champ(s) de formulaire rempli(s)")
+
+            # 2. Remplacement de texte exact (masquage propre + réécriture à la même position)
+            replacements = args.get("replacements") or []
+            if isinstance(replacements, list) and replacements:
+                rep_count = 0
+                for item in replacements:
+                    search_str = str(item.get("search", ""))
+                    replace_str = str(item.get("replace", ""))
+                    custom_fs = item.get("fontsize")
+                    target_page = item.get("page")
+                    if not search_str:
+                        continue
+
+                    pages_to_scan = [doc[int(target_page)]] if target_page is not None and 0 <= int(target_page) < len(doc) else doc
+                    for page in pages_to_scan:
+                        hits = page.search_for(search_str)
+                        if not hits:
+                            continue
+                        insert_queue = []
+                        for r in hits:
+                            fs = float(custom_fs) if custom_fs else max(8.0, round(r.height * 0.78, 1))
+                            page.add_redact_annot(r, fill=(1, 1, 1))
+                            insert_queue.append((fitz.Point(r.x0, r.y1 - (r.height * 0.18)), replace_str, fs))
+                        page.apply_redactions()
+                        for pt, txt, fs in insert_queue:
+                            page.insert_text(pt, txt, fontsize=fs, fontname="helv", color=(0, 0, 0))
+                            rep_count += 1
+                changes_log.append(f"{rep_count} remplacement(s) de texte effectué(s)")
+
+            # 3. Insertion de texte libre à des coordonnées (x, y)
+            insert_texts = args.get("insert_texts") or []
+            if isinstance(insert_texts, list) and insert_texts:
+                ins_count = 0
+                for item in insert_texts:
+                    p_idx = int(item.get("page", 0))
+                    if 0 <= p_idx < len(doc):
+                        page = doc[p_idx]
+                        x = float(item["x"])
+                        y = float(item["y"])
+                        txt = str(item["text"])
+                        fs = float(item.get("fontsize", 11))
+                        page.insert_text(fitz.Point(x, y), txt, fontsize=fs, fontname="helv", color=(0, 0, 0))
+                        ins_count += 1
+                changes_log.append(f"{ins_count} texte(s) inséré(s)")
+
+            # 4. Insertion d'images ou signatures PNG/JPG
+            insert_images = args.get("insert_images") or []
+            if isinstance(insert_images, list) and insert_images:
+                img_count = 0
+                for item in insert_images:
+                    p_idx = int(item.get("page", 0))
+                    rect_coords = item.get("rect", [])
+                    img_path = _resolve_pdf_path(str(item.get("image_path", "")))
+                    if 0 <= p_idx < len(doc) and len(rect_coords) == 4 and os.path.exists(img_path):
+                        page = doc[p_idx]
+                        page.insert_image(fitz.Rect(*[float(c) for c in rect_coords]), filename=img_path)
+                        img_count += 1
+                changes_log.append(f"{img_count} image(s)/signature(s) insérée(s)")
+
+            # Sauvegarde sécurisée (gère aussi l'écrasement du fichier source)
+            out_raw = args.get("output_path")
+            out_path = _resolve_pdf_path(out_raw) if out_raw else pdf_path
+
+            if os.path.abspath(out_path) == os.path.abspath(pdf_path):
+                temp_out = pdf_path + ".tmp_edit.pdf"
+                doc.save(temp_out, garbage=3, deflate=True)
+                doc.close()
+                os.replace(temp_out, pdf_path)
+                final_saved = pdf_path
+            else:
+                doc.save(out_path, garbage=3, deflate=True)
+                doc.close()
+                final_saved = out_path
+
+            summary_str = ", ".join(changes_log) if changes_log else "aucune modification spécifiée"
+            return f"PDF modifié avec succès ({summary_str}) -> Enregistré sous : {final_saved}"
+
+        else:
+            doc.close()
+            return f"Action edit_pdf inconnue : {action}"
+    except Exception as e:
+        try:
+            doc.close()
+        except Exception:
+            pass
+        return f"Erreur lors du traitement PDF : {e}"
 
 
 def execute_action(name: str, args: dict, app_instance=None) -> str:
@@ -643,6 +912,9 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
                 pyautogui.press("enter")
                 time.sleep(0.06)
             return f"Contenu copié/collé via presse-papiers ({len(text)} caractères)."
+
+        elif name == "edit_pdf":
+            return _handle_edit_pdf(args)
 
         elif name == "send_cisco_cli_block":
             commands_raw = str(args.get("commands", ""))
@@ -885,7 +1157,7 @@ def run_agent(task: str, app_instance=None, max_steps: int = 45):
             loop_warning = (
                 "\n⚠️ ATTENTION : L'écran n'a pas changé après tes 3 dernières actions. "
                 "Si la mission demandée est déjà terminée, appelle IMMÉDIATEMENT `finish_task` sans refaire de clic. "
-                "Sinon, change d'approche (`open_app_or_url`, `focus_window`, ou `ask_human`)."
+                "Sinon, change d'approche (`open_app_or_url`, `focus_window`, `edit_pdf`, ou `ask_human`)."
             )
             log_msg("⚠️ Détection de boucle : l'écran ne change pas, ajustement de la stratégie...\n", "error")
 
@@ -979,7 +1251,7 @@ def run_agent(task: str, app_instance=None, max_steps: int = 45):
                     return
                 continue
 
-            # Cas 3 : Action système / GUI / CLI
+            # Cas 3 : Action système / GUI / CLI / PDF
             log_msg(f"⚡ [{step}] {fn_name}({json.dumps(fn_args, ensure_ascii=False)[:90]})\n", "agent")
             result_str = execute_action(fn_name, fn_args, app_instance=app_instance)
             step_summaries.append(f"{fn_name} -> {result_str}")
