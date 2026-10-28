@@ -257,7 +257,20 @@ def handle_client(conn, addr):
                     else:
                         app_instance.engine_mode = "terra"
                         app_instance.log("🚀 Bascule sur le Mode TERRA (OpenAI GPT-6.1 Terra) : idéal pour la bureautique, PDF et navigation complète !\n", "system")
+                # 3-bis. SYNCHRONISATION DU SOUS-MENU CLÉS API & OAUTH DEPUIS L'APP CLIENT
+                elif msg_type == "sync_credentials":
+                    or_key = msg.get("openrouter_key", "").strip()
+                    if or_key:
+                        save_api_key(or_key)
+                        app_instance.awaiting_api_key = False
 
+                    creds_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "credentials.json")
+                    try:
+                        with open(creds_path, "w", encoding="utf-8") as f:
+                            json.dump(msg, f, indent=2, ensure_ascii=False)
+                        app_instance.log("✅ Clés API, identifiants Mail et OAuth synchronisés sur la VM (credentials.json) !\n", "system")
+                    except Exception as err:
+                        app_instance.log(f"⚠️ Erreur sauvegarde credentials.json : {err}\n", "error")
                 # 4. INSTRUCTION, CLÉ API OU RÉPONSE
                 elif msg_type in ["instruction", "task"]:
                     content = msg.get("content", "").strip()
