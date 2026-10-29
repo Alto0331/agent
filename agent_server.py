@@ -137,19 +137,18 @@ ouvrir_pare_feu_port(65432)
 
 from openai import OpenAI
 
-# --- 1. CHARGEMENT DES CERVEAUX (TERRA + LITE CLAUDE + PONT LOCAL OLLAMA) ---
+# --- 1. CHARGEMENT DES CERVEAUX D'EXÉCUTION (TERRA / LITE / OLLAMA) ---
 import variant_agentterratest as engine_terra
 
 try:
     import agent_core as engine_lite
     HAS_LITE_ENGINE = True
-    print("Double moteur chargé : [1] GPT-6.1 Terra (Principal) | [2] Claude Haiku 5.5 (Mode Lite) | [3] Ollama Local\n")
+    print("Moteurs d'action chargés : [1] GPT-6.1 Terra | [2] Claude Haiku 5.5 | [3] Ollama Local\n")
 except Exception as e:
     engine_lite = None
     HAS_LITE_ENGINE = False
-    print(f"Info : Moteur secondaire 'agent_core.py' non détecté ({e}). GPT-6.1 Terra & Ollama sont actifs.\n")
+    print(f"Info : Moteur 'agent_core.py' absent ({e}). Terra & Ollama actifs.\n")
 
-# Sauvegarde des fonctions et constantes d'origine de Terra / Lite pour pouvoir basculer vers Ollama et revenir
 _ORIG_TERRA_GET_CLIENT = engine_terra.get_openrouter_client
 _ORIG_TERRA_PRIMARY = engine_terra.TERRA_MODEL_PRIMARY
 _ORIG_TERRA_FALLBACK = engine_terra.TERRA_MODEL_FALLBACK
@@ -158,16 +157,72 @@ if HAS_LITE_ENGINE:
     _ORIG_LITE_GET_CLIENT = engine_lite.get_openrouter_client
     _ORIG_LITE_MODEL = engine_lite.MODEL_LITE
 
-# Gestionnaire de clé API unifié
 load_api_key = engine_terra.load_api_key
 save_api_key = engine_terra.save_api_key
 
-# Référence globale vers l'instance client connectée (pour diffuser aussi les logs des missions Mail)
 ACTIVE_CLIENT_INSTANCE = None
 
 
 # ==============================================================================
-# 2. GESTION DES PARAMÈTRES SYNCHRONISÉS & ROUTAGE OLLAMA LOCAL
+# 2. MODULE MISTRAL : CERVEAU AMONT D'ANALYSE & RÉFLEXION
+# ==============================================================================
+def get_mistral_api_key() -> str:
+    """Récupère la clé API Mistral depuis credentials.json ou les variables d'environnement."""
+    creds = load_credentials()
+    key = creds.get("mistral_api_key", "").strip()
+    if not key and creds.get("extra_api_name", "").lower().startswith("mistral"):
+        key = creds.get("extra_api_key", "").strip()
+    return key or os.environ.get("MISTRAL_API_KEY", "").strip()
+
+
+def run_mistral_analysis(raw_task: str, app_instance=None) -> str:
+    """
+    Interroge l'API officielle de Mistral (via l'endpoint compatible OpenAI)
+    pour analyser la demande complexe, rédiger le code ou élaborer le plan d'action
+    avant de transmettre la feuille de route au moteur d'exécution visuelle (Terra/Claude).
+    """
+    mistral_key = get_mistral_api_key()
+    if not mistral_key:
+        return raw_task
+
+    if app_instance:
+        app_instance.log("🧠 [Mistral AI] Analyse de la tâche et préparation du plan d'action...\n", "system")
+
+    try:
+        client = OpenAI(
+            base_url="https://api.mistral.ai/v1",
+            api_key=mistral_key,
+            timeout=40.0
+        )
+        sys_prompt = (
+            "Tu es l'architecte logiciel et le superviseur technique d'un agent Windows d'exécution visuelle (Terra). "
+            "Analyse la consigne utilisateur suivante. Si du code (Python, GDScript, CLI Cisco, etc.) est requis, "
+            "rédige-le rigoureusement sans faute. Découpe la mission en étapes claires et concises que l'agent d'exécution "
+            "pourra appliquer sur l'écran de la VM sans hésitation. Reste direct et structuré."
+        )
+        response = client.chat.completions.create(
+            model="mistral-large-latest",
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": raw_task}
+            ],
+            temperature=0.2,
+            max_tokens=1400
+        )
+        plan = (response.choices[0].message.content or "").strip()
+        if plan:
+            if app_instance:
+                app_instance.log(f"📋 [Plan Mistral généré] : {plan[:160]}...\n", "agent")
+            return f"{raw_task}\n\n[PLAN ET INSTRUCTIONS DÉTAILLÉES PRÉPARÉES PAR MISTRAL] :\n{plan}"
+    except Exception as e:
+        if app_instance:
+            app_instance.log(f"⚠️ Mistral indisponible ({e}). Bascule directe sur le moteur d'exécution standard.\n", "error")
+
+    return raw_task
+
+
+# ==============================================================================
+# 3. GESTION DES IDENTIFIANTS & CONFIGURATION RUNTIME
 # ==============================================================================
 def load_credentials() -> dict:
     if os.path.exists(CREDENTIALS_FILE):
@@ -182,7 +237,6 @@ def load_credentials() -> dict:
 def save_credentials(data: dict) -> dict:
     current = load_credentials()
     current.update(data)
-    # Nettoyage systématique des espaces dans le mot de passe d'application Google (16 caractères)
     if "terra_mail_app_password" in current and isinstance(current["terra_mail_app_password"], str):
         current["terra_mail_app_password"] = current["terra_mail_app_password"].replace(" ", "").strip()
     try:
@@ -194,20 +248,12 @@ def save_credentials(data: dict) -> dict:
 
 
 def configure_runtime_for_mode(mode: str, creds: dict | None = None):
-    """
-    Configure dynamiquement les moteurs selon le mode choisi :
-    - 'local' : redirige les appels OpenAI vers le serveur local Ollama (sans consommer de crédits OpenRouter)
-    - 'terra' / 'lite' : restaure la configuration OpenRouter d'origine
-    """
     if creds is None:
         creds = load_credentials()
 
     if mode == "local":
         raw_url = creds.get("ollama_url", "http://localhost:11434").strip().rstrip("/")
-        if not raw_url.endswith("/v1"):
-            base_url = raw_url + "/v1"
-        else:
-            base_url = raw_url
+        base_url = raw_url if raw_url.endswith("/v1") else raw_url + "/v1"
         model_name = creds.get("ollama_model", "qwen2.5-vl:7b").strip() or "qwen2.5-vl:7b"
 
         def _get_ollama_client():
@@ -231,10 +277,9 @@ def configure_runtime_for_mode(mode: str, creds: dict | None = None):
 
 
 # ==============================================================================
-# 3. INSTANCE D'EXÉCUTION (TCP + PONT EMAIL ASYNCHRONE)
+# 4. INSTANCE D'EXÉCUTION RÉSEAU ET ORCHESTRATION DU TANDEM
 # ==============================================================================
 class RemoteAppInstance:
-    """Simule l'interface GUI pour Terra/Lite et communique en temps réel avec app_client.py et/ou par Email."""
     def __init__(self, conn=None, mail_reply_to: str | None = None, mail_subject: str | None = None):
         self.conn = conn
         self.mail_reply_to = mail_reply_to
@@ -260,7 +305,6 @@ class RemoteAppInstance:
         if "✅ Mission accomplie :" in clean_msg:
             self.final_summary = clean_msg.split("✅ Mission accomplie :", 1)[-1].strip()
 
-        # Si la mission a été déclenchée par mail et que l'agent pose une question (ask_human), on envoie un mail !
         if self.mail_reply_to and ("L'agent a besoin d'aide :" in clean_msg or "🤖 Question :" in clean_msg):
             threading.Thread(
                 target=MAIL_WATCHER.send_email,
@@ -270,13 +314,12 @@ class RemoteAppInstance:
                     (
                         f"Bonjour,\n\nL'agent sur la VM a besoin d'une précision pour continuer sa mission :\n\n"
                         f"👉 {clean_msg.strip()}\n\n"
-                        f"Réponds simplement à cet email (ou dans la bulle Assistant VM) pour qu'il reprenne."
+                        f"Réponds directement à cet email pour relancer l'exécution."
                     ),
                 ),
                 daemon=True,
             ).start()
 
-        # Envoi vers la bulle cliente TCP (soit sa propre connexion, soit la bulle active si c'est une mission mail)
         target_conn = self.conn
         if target_conn is None and ACTIVE_CLIENT_INSTANCE is not None:
             target_conn = ACTIVE_CLIENT_INSTANCE.conn
@@ -296,7 +339,6 @@ class RemoteAppInstance:
 
 
 def get_active_engine(app_instance: RemoteAppInstance):
-    """Retourne le module moteur actif selon le mode sélectionné ('terra', 'lite' ou 'local')."""
     mode = getattr(app_instance, "engine_mode", "terra")
     configure_runtime_for_mode(mode)
     if mode == "lite" and HAS_LITE_ENGINE:
@@ -309,64 +351,64 @@ def start_agent_task(task: str, app_instance: RemoteAppInstance, on_complete=Non
     mode = getattr(app_instance, "engine_mode", "terra")
     active_engine = get_active_engine(app_instance)
 
+    mistral_ready = bool(get_mistral_api_key())
     if mode == "local":
-        mode_label = f"Mode LOCAL Ollama ({creds.get('ollama_model', 'qwen2.5-vl:7b')})"
+        exec_label = f"Ollama Local ({creds.get('ollama_model', 'qwen2.5-vl:7b')})"
     elif active_engine is engine_lite:
-        mode_label = "Mode LITE (Claude Haiku 5.5 - agent_core)"
+        exec_label = "Claude Haiku 5.5 (Mode Lite)"
     else:
-        mode_label = "Mode TERRA (GPT-6.1 Terra)"
+        exec_label = "GPT-6.1 Terra"
 
-    # Si un compte principal est configuré dans l'onglet 1, on le met à disposition de l'agent en contexte
-    main_email = creds.get("main_account_email", "").strip()
-    main_pwd = creds.get("main_account_password", "").strip()
-    enriched_task = task
-    if main_email and main_email.lower() not in task.lower():
-        enriched_task += (
-            f"\n\n[Note Système : Si une connexion utilisateur est requise et non ouverte dans Brave, "
-            f"utilise le compte principal '{main_email}'"
-            + (f" et le mot de passe '{main_pwd}'." if main_pwd else ".]")
-        )
+    tandem_label = f"Tandem Mistral -> {exec_label}" if mistral_ready else exec_label
 
-    app_instance.log(f"🧠 [{mode_label}] Reçu instruction : {task[:70]}...\n", "system")
+    app_instance.log(f"🚀 [Orchestration : {tandem_label}] Début de la mission.\n", "system")
     app_instance.stop_requested = False
     app_instance.agent_running = True
     app_instance.collected_logs.clear()
     app_instance.final_summary = ""
     app_instance.shared_state = {"data": None, "done": False}
 
-    def prep(t=enriched_task, eng=active_engine):
+    def full_workflow():
         try:
-            app_instance.shared_state["data"] = eng.prepare_task_data(t)
-        except Exception:
-            app_instance.shared_state["data"] = None
-        app_instance.shared_state["done"] = True
+            # Étape 1 : Réflexion & élaboration du plan par Mistral si la clé est fournie
+            enriched_task = run_mistral_analysis(task, app_instance=app_instance)
 
-    threading.Thread(target=prep, daemon=True).start()
+            if app_instance.stop_requested:
+                return
 
-    def launch(t=enriched_task, eng=active_engine):
-        try:
-            eng.run_agent(t, app_instance)
+            # Étape 2 : Injection sécurisée du compte principal si présent
+            main_email = creds.get("main_account_email", "").strip()
+            main_pwd = creds.get("main_account_password", "").strip()
+            if main_email and main_email.lower() not in enriched_task.lower():
+                enriched_task += (
+                    f"\n\n[Note Système : Si une connexion est demandée et non ouverte dans Brave, "
+                    f"utilise '{main_email}'" + (f" avec le mot de passe '{main_pwd}'." if main_pwd else ".]")
+                )
+
+            # Étape 3 : Détection de profil pour l'exécuteur
+            try:
+                app_instance.shared_state["data"] = active_engine.prepare_task_data(enriched_task)
+            except Exception:
+                app_instance.shared_state["data"] = None
+            app_instance.shared_state["done"] = True
+
+            # Étape 4 : Exécution physique à l'écran (Terra / Claude / Ollama)
+            active_engine.run_agent(enriched_task, app_instance)
         finally:
             app_instance.agent_running = False
             if callable(on_complete):
                 try:
                     on_complete(app_instance)
                 except Exception as cb_err:
-                    print(f"[Callback] Erreur fin de mission : {cb_err}")
+                    print(f"[Callback] Erreur : {cb_err}")
 
-    threading.Thread(target=launch, daemon=True).start()
+    threading.Thread(target=full_workflow, daemon=True).start()
 
 
 # ==============================================================================
-# 4. MODULE MAILWATCHER (PONT EMAIL MISTRAL / UTILISATEUR <-> TERRA VM)
+# 5. MODULE MAILWATCHER (IMAP / SMTP)
 # ==============================================================================
 class MailWatcher:
-    """
-    Surveille en tâche de fond la boîte Gmail dédiée à Terra via IMAP SSL (avec le code à 16 caractères).
-    - Déclenche automatiquement une mission dès réception d'un mail autorisé ou titré MISSION / TERRA.
-    - Transmet la réponse par mail si l'agent est en pause (ask_human).
-    - Renvoie un rapport complet par SMTP dès que la mission est terminée.
-    """
     def __init__(self):
         self.running = True
         self.current_mail_instance: RemoteAppInstance | None = None
@@ -374,9 +416,8 @@ class MailWatcher:
 
     def _get_host_ports(self, email_addr: str):
         domain = email_addr.split("@")[-1].lower() if "@" in email_addr else ""
-        if "outlook" in domain or "hotmail" in domain or "live" in domain or "office365" in domain:
+        if any(d in domain for d in ["outlook", "hotmail", "live", "office365"]):
             return "outlook.office365.com", 993, "smtp.office365.com", 587, False
-        # Par défaut : Gmail (imap.gmail.com / smtp.gmail.com)
         return "imap.gmail.com", 993, "smtp.gmail.com", 465, True
 
     def _decode_str(self, raw_val) -> str:
@@ -434,28 +475,28 @@ class MailWatcher:
                     server.login(terra_email, terra_pwd)
                     server.send_message(em)
 
-            print(f"[MailWatcher] 📤 Rapport envoyé par mail à {to_addr}")
+            print(f"[MailWatcher] 📤 Rapport envoyé à {to_addr}")
             return True
         except Exception as e:
-            print(f"[MailWatcher] ❌ Erreur d'envoi SMTP : {e}")
+            print(f"[MailWatcher] ❌ Erreur SMTP : {e}")
             return False
 
     def _on_mail_task_complete(self, instance: RemoteAppInstance):
-        summary = instance.final_summary or "Exécution terminée (voir les détails ci-dessous)."
+        summary = instance.final_summary or "Exécution terminée."
         recent_logs = "\n".join(instance.collected_logs[-20:])
         report_body = (
             f"Bonjour,\n\n"
-            f"Voici le rapport d'exécution de l'agent Terra sur la VM :\n\n"
+            f"Voici le rapport d'exécution sur la VM :\n\n"
             f"✅ RÉSUMÉ : {summary}\n\n"
-            f"--- JOURNAL DES ACTIONS EXÉCUTÉES ---\n"
+            f"--- ACTIONS EXÉCUTÉES ---\n"
             f"{recent_logs}\n"
-            f"--------------------------------------\n"
+            f"-------------------------\n"
         )
         subj = f"Re: {instance.mail_subject or 'MISSION TERRA'} [TERMINÉ]"
         self.send_email(instance.mail_reply_to, subj, report_body)
 
     def watch_loop(self):
-        print("[MailWatcher] 📩 Service d'écoute email prêt en tâche de fond.")
+        print("[MailWatcher] 📩 Service d'écoute IMAP actif en arrière-plan.")
         while self.running:
             try:
                 creds = load_credentials()
@@ -473,11 +514,10 @@ class MailWatcher:
                 mail.login(terra_email, terra_pwd)
                 mail.select("INBOX")
 
-                # Reset du message d'erreur si la connexion réussit
                 if self.last_error_logged:
                     self.last_error_logged = ""
                     if ACTIVE_CLIENT_INSTANCE:
-                        ACTIVE_CLIENT_INSTANCE.log("✅ Connexion IMAP à la boîte Mail de Terra établie avec succès !\n", "system")
+                        ACTIVE_CLIENT_INSTANCE.log("✅ Connexion IMAP à la boîte Mail de Terra rétablie !\n", "system")
 
                 status, messages = mail.search(None, "UNSEEN")
                 if status == "OK" and messages and messages[0]:
@@ -492,33 +532,28 @@ class MailWatcher:
                         subject = self._decode_str(msg.get("Subject", ""))
                         body = self._extract_text_body(msg)
 
-                        # Évite que l'agent se réponde à lui-même en boucle
                         if sender_addr == terra_email.lower():
                             continue
 
-                        # Filtre de sécurité : accepte si expéditeur autorisé OU si le sujet contient TERRA / MISSION / AGENT
                         subject_up = subject.upper()
                         has_keyword = any(k in subject_up for k in ["TERRA", "MISSION", "AGENT", "TASK", "VM"])
                         if auth_sender and sender_addr != auth_sender and not has_keyword:
-                            print(f"[MailWatcher] Ignoré (expéditeur {sender_addr} non autorisé et sans mot-clé).")
                             continue
 
                         instruction_text = body.strip() if body.strip() else subject.strip()
                         if not instruction_text:
                             continue
 
-                        # Cas 1 : Une mission est déjà en pause (ask_human), ce mail est la réponse !
                         if (
                             self.current_mail_instance
                             and self.current_mail_instance.agent_running
                             and not self.current_mail_instance.wait_event.is_set()
                         ):
-                            self.current_mail_instance.log(f"📩 Réponse reçue par mail de {sender_addr} !\n", "system")
+                            self.current_mail_instance.log(f"📩 Réponse mail reçue de {sender_addr} !\n", "system")
                             self.current_mail_instance.human_response = instruction_text
                             self.current_mail_instance.wait_event.set()
                             continue
 
-                        # Cas 2 : Commande STOP envoyée par mail
                         if subject_up.strip() == "STOP" or instruction_text.upper() == "STOP":
                             if self.current_mail_instance and self.current_mail_instance.agent_running:
                                 self.current_mail_instance.stop_requested = True
@@ -526,23 +561,18 @@ class MailWatcher:
                             if ACTIVE_CLIENT_INSTANCE and ACTIVE_CLIENT_INSTANCE.agent_running:
                                 ACTIVE_CLIENT_INSTANCE.stop_requested = True
                                 ACTIVE_CLIENT_INSTANCE.wait_event.set()
-                            self.send_email(sender_addr, f"Re: {subject} [STOPPÉ]", "La mission en cours sur la VM a été interrompue.")
+                            self.send_email(sender_addr, f"Re: {subject} [STOPPÉ]", "Mission arrêtée.")
                             continue
 
-                        # Cas 3 : Nouvelle mission déclenchée par mail
                         busy = (
                             (self.current_mail_instance and self.current_mail_instance.agent_running)
                             or (ACTIVE_CLIENT_INSTANCE and ACTIVE_CLIENT_INSTANCE.agent_running)
                         )
                         if busy:
-                            self.send_email(
-                                sender_addr,
-                                f"Re: {subject} [VM OCCUPÉE]",
-                                "L'agent exécute déjà une mission en cours. Envoie 'STOP' si tu veux l'interrompre.",
-                            )
+                            self.send_email(sender_addr, f"Re: {subject} [OCCUPÉ]", "L'agent traite déjà une tâche.")
                             continue
 
-                        print(f"[MailWatcher] 📩 Nouvelle mission reçue par mail de {sender_addr} : {subject}")
+                        print(f"[MailWatcher] 📩 Mission mail reçue de {sender_addr} : {subject}")
                         mail_inst = RemoteAppInstance(conn=None, mail_reply_to=sender_addr, mail_subject=subject)
                         self.current_mail_instance = mail_inst
                         mail_inst.log(f"\n📩 [MAIL REÇU DE {sender_addr}] Sujet : {subject}\n", "user")
@@ -555,12 +585,9 @@ class MailWatcher:
                 err_str = str(err)
                 if err_str != self.last_error_logged:
                     self.last_error_logged = err_str
-                    print(f"[MailWatcher] ⚠️ Avertissement connexion Mail Terra : {err_str}")
+                    print(f"[MailWatcher] ⚠️ Alerte Mail Terra : {err_str}")
                     if ACTIVE_CLIENT_INSTANCE:
-                        ACTIVE_CLIENT_INSTANCE.log(
-                            f"⚠️ Erreur de connexion Mail Terra (vérifie l'email ou le code à 16 lettres dans ⚙️ Paramètres > 📩 Mail Terra) : {err_str}\n",
-                            "error",
-                        )
+                        ACTIVE_CLIENT_INSTANCE.log(f"⚠️ Erreur Mail Terra : {err_str}\n", "error")
 
             time.sleep(12)
 
@@ -569,7 +596,7 @@ MAIL_WATCHER = MailWatcher()
 
 
 # ==============================================================================
-# 5. GESTION DU CLIENT TCP (PC PRINCIPAL <-> VM)
+# 6. GESTION DU CLIENT TCP (APP CLIENT <-> VM)
 # ==============================================================================
 def handle_client(conn, addr):
     global ACTIVE_CLIENT_INSTANCE
@@ -578,22 +605,19 @@ def handle_client(conn, addr):
     ACTIVE_CLIENT_INSTANCE = app_instance
 
     creds = load_credentials()
-    mail_status = "Actif" if creds.get("terra_mail_address") and creds.get("terra_mail_app_password") else "Non configuré"
+    mail_ok = bool(creds.get("terra_mail_address") and creds.get("terra_mail_app_password"))
+    mistral_ok = bool(get_mistral_api_key())
 
     app_instance.log(
-        "✅ Connecté avec succès au cerveau de l'agent dans la VM !\n"
-        f"⚙️ Moteurs : Terra | Lite Claude ({'OUI' if HAS_LITE_ENGINE else 'NON'}) | Ollama Local | 📩 Mail Terra : {mail_status}\n",
+        "✅ Connecté au serveur de la VM !\n"
+        f"⚙️ Moteurs : Terra | Lite Claude ({'OUI' if HAS_LITE_ENGINE else 'NON'}) | Ollama\n"
+        f"🧠 Réflexion Mistral amont : {'Connecté (Tandem Actif)' if mistral_ok else 'Non configuré (Exécution directe)'} | 📩 Mail : {'Actif' if mail_ok else 'Inactif'}\n",
         "system"
     )
 
-    # Si aucune clé OpenRouter n'est présente et qu'on n'est pas en mode Local Ollama
     if not load_api_key() and app_instance.engine_mode != "local":
         app_instance.awaiting_api_key = True
-        app_instance.log(
-            "🔑 Aucune clé API OpenRouter détectée (api_key.txt absent).\n"
-            "👉 Renseigne-la dans ⚙️ Paramètres > 🔑 API & OAuth (ou colle-la directement ici) :\n",
-            "agent"
-        )
+        app_instance.log("🔑 Aucune clé OpenRouter détectée. Renseigne-la dans ⚙️ Paramètres > 🔑 API & OAuth.\n", "agent")
 
     buffer = ""
     while True:
@@ -615,7 +639,6 @@ def handle_client(conn, addr):
 
                 msg_type = msg.get("type", "instruction")
 
-                # 1. ARRÊT D'URGENCE IMMÉDIAT (arrête aussi une éventuelle mission lancée par mail)
                 if msg_type == "stop":
                     app_instance.stop_requested = True
                     app_instance.human_response = "Action annulée par l'utilisateur (STOP NET)."
@@ -623,14 +646,12 @@ def handle_client(conn, addr):
                     if MAIL_WATCHER.current_mail_instance and MAIL_WATCHER.current_mail_instance.agent_running:
                         MAIL_WATCHER.current_mail_instance.stop_requested = True
                         MAIL_WATCHER.current_mail_instance.wait_event.set()
-                    app_instance.log("🛑 Commande STOP reçue. Interruption forcée.\n", "system")
+                    app_instance.log("🛑 Commande STOP reçue.\n", "system")
 
-                # 2. DEMANDE DE CHANGEMENT DE CLÉ API
                 elif msg_type == "reset_key":
                     app_instance.awaiting_api_key = True
-                    app_instance.log("🔑 Entre ta nouvelle clé API OpenRouter pour remplacer l'ancienne :\n", "agent")
+                    app_instance.log("🔑 Entre ta nouvelle clé OpenRouter :\n", "agent")
 
-                # 3. CHANGEMENT DE MOTEUR IA (TERRA <-> LITE CLAUDE <-> LOCAL OLLAMA)
                 elif msg_type == "set_mode":
                     requested_mode = str(msg.get("mode", "terra")).lower().strip()
                     if "ollama_url" in msg or "ollama_model" in msg:
@@ -645,28 +666,28 @@ def handle_client(conn, addr):
                         if HAS_LITE_ENGINE:
                             app_instance.engine_mode = "lite"
                             configure_runtime_for_mode("lite")
-                            app_instance.log("⚡ Bascule sur le Mode LITE (Claude Haiku 5.5 - agent_core.py) : idéal pour le tri de dossiers et Cisco !\n", "system")
+                            app_instance.log("⚡ Mode LITE (Claude Haiku 5.5) activé.\n", "system")
                         else:
-                            app_instance.log("⚠️ Impossible d'activer le Mode Lite : le fichier 'agent_core.py' est absent sur la VM.\n", "error")
+                            app_instance.log("⚠️ Fichier 'agent_core.py' absent sur la VM.\n", "error")
                     elif requested_mode == "local":
                         app_instance.engine_mode = "local"
                         c = load_credentials()
                         configure_runtime_for_mode("local", c)
-                        app_instance.log(
-                            f"🦙 Bascule sur le Mode LOCAL Ollama ({c.get('ollama_model', 'qwen2.5-vl:7b')} via {c.get('ollama_url', 'http://localhost:11434')}) !\n",
-                            "system"
-                        )
+                        app_instance.log(f"🦙 Mode LOCAL Ollama ({c.get('ollama_model', 'qwen2.5-vl:7b')}) activé.\n", "system")
                     else:
                         app_instance.engine_mode = "terra"
                         configure_runtime_for_mode("terra")
-                        app_instance.log("🚀 Bascule sur le Mode TERRA (OpenAI GPT-6.1 Terra) : idéal pour la bureautique, PDF et navigation complète !\n", "system")
+                        app_instance.log("🚀 Mode TERRA (OpenAI GPT-6.1 Terra) activé.\n", "system")
 
-                # 3-bis. SYNCHRONISATION DU MENU PARAMÈTRES COMPLET DEPUIS L'APP CLIENT
                 elif msg_type == "sync_credentials":
                     or_key = msg.get("openrouter_key", "").strip()
                     if or_key:
                         save_api_key(or_key)
                         app_instance.awaiting_api_key = False
+
+                    # Si l'utilisateur a rentré sa clé Mistral dans l'onglet API
+                    if msg.get("extra_api_name", "").lower().startswith("mistral") and msg.get("extra_api_key"):
+                        msg["mistral_api_key"] = msg["extra_api_key"].strip()
 
                     saved = save_credentials(msg)
                     new_mode = saved.get("engine_mode", app_instance.engine_mode)
@@ -675,57 +696,50 @@ def handle_client(conn, addr):
                     app_instance.engine_mode = new_mode
                     configure_runtime_for_mode(new_mode, saved)
 
-                    terra_mail_ok = bool(saved.get("terra_mail_address") and saved.get("terra_mail_app_password"))
-                    MAIL_WATCHER.last_error_logged = ""  # Force une revérification immédiate du compte mail
+                    t_mail = bool(saved.get("terra_mail_address") and saved.get("terra_mail_app_password"))
+                    m_ready = bool(get_mistral_api_key())
+                    MAIL_WATCHER.last_error_logged = ""
                     app_instance.log(
-                        f"✅ Paramètres synchronisés sur la VM (Mode: {new_mode.upper()} | Mail Terra: {'Configuré' if terra_mail_ok else 'Inactif'}) !\n",
+                        f"✅ Paramètres synchronisés (Mode: {new_mode.upper()} | Réflexion Mistral: {'ACTIVE' if m_ready else 'OFF'} | Mail Terra: {'OK' if t_mail else 'OFF'}).\n",
                         "system"
                     )
 
-                # 4. INSTRUCTION, CLÉ API OU RÉPONSE
                 elif msg_type in ["instruction", "task"]:
                     content = msg.get("content", "").strip()
 
-                    # Raccourcis texte pratiques dans le chat : /lite, /terra ou /local
                     if content.lower() in ["/lite", "!lite"]:
                         if HAS_LITE_ENGINE:
                             app_instance.engine_mode = "lite"
                             configure_runtime_for_mode("lite")
                             app_instance.log("⚡ Mode LITE (Claude Haiku 5.5) activé.\n", "system")
-                        else:
-                            app_instance.log("⚠️ 'agent_core.py' est introuvable sur la VM.\n", "error")
                         continue
                     elif content.lower() in ["/terra", "!terra"]:
                         app_instance.engine_mode = "terra"
                         configure_runtime_for_mode("terra")
-                        app_instance.log("🚀 Mode TERRA (GPT-6.1 Terra) activé.\n", "system")
+                        app_instance.log("🚀 Mode TERRA activé.\n", "system")
                         continue
                     elif content.lower() in ["/local", "!local", "/ollama"]:
                         app_instance.engine_mode = "local"
                         configure_runtime_for_mode("local")
-                        app_instance.log("🦙 Mode LOCAL (Ollama) activé.\n", "system")
+                        app_instance.log("🦙 Mode LOCAL Ollama activé.\n", "system")
                         continue
 
-                    # Cas A : Saisie de la clé API
                     if app_instance.awaiting_api_key and app_instance.engine_mode != "local":
                         save_api_key(content)
                         app_instance.awaiting_api_key = False
-                        app_instance.log("✅ Clé API enregistrée dans 'api_key.txt' ! Tu peux lancer tes tâches.\n", "system")
-
+                        app_instance.log("✅ Clé API enregistrée !\n", "system")
                         if app_instance.pending_task:
                             t = app_instance.pending_task
                             app_instance.pending_task = None
                             start_agent_task(t, app_instance)
                         continue
 
-                    # Cas B : api_key.txt manquant (hors mode Local Ollama)
                     if not load_api_key() and app_instance.engine_mode != "local":
                         app_instance.awaiting_api_key = True
                         app_instance.pending_task = content
-                        app_instance.log("🔑 Clé API OpenRouter introuvable. Colle ta clé API pour lancer cette tâche :\n", "agent")
+                        app_instance.log("🔑 Clé API introuvable. Colle ta clé OpenRouter :\n", "agent")
                         continue
 
-                    # Cas C : Attente ask_human (sur l'instance courante ou sur une mission mail en cours)
                     if app_instance.agent_running and not app_instance.wait_event.is_set():
                         app_instance.human_response = content
                         app_instance.wait_event.set()
@@ -737,7 +751,6 @@ def handle_client(conn, addr):
                         MAIL_WATCHER.current_mail_instance.human_response = content
                         MAIL_WATCHER.current_mail_instance.wait_event.set()
                     else:
-                        # Cas D : Nouvelle tâche normale
                         start_agent_task(content, app_instance)
 
                 elif msg_type == "answer":
@@ -749,7 +762,7 @@ def handle_client(conn, addr):
                         MAIL_WATCHER.current_mail_instance.wait_event.set()
 
         except Exception as e:
-            print(f"[Réseau] Erreur de communication : {e}")
+            print(f"[Réseau] Erreur : {e}")
             break
 
     print("[Réseau] PC Principal déconnecté.")
@@ -759,7 +772,6 @@ def handle_client(conn, addr):
 
 
 def get_real_local_ip():
-    """Récupère la véritable adresse IP réseau de la VM (évite 127.0.0.1 ou les interfaces secondaires)."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -774,7 +786,6 @@ if __name__ == "__main__":
     local_ip = get_real_local_ip()
     port = 65432
 
-    # Lancement du thread d'écoute des emails de Terra (IMAP/SMTP)
     threading.Thread(target=MAIL_WATCHER.watch_loop, daemon=True).start()
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -783,21 +794,19 @@ if __name__ == "__main__":
     server.listen(1)
 
     init_creds = load_credentials()
-    mail_cfg_str = init_creds.get("terra_mail_address") or "Non configuré (à remplir dans ⚙️ Paramètres)"
+    mail_cfg_str = init_creds.get("terra_mail_address") or "Non configuré"
+    mistral_state = "Actif" if get_mistral_api_key() else "Inactif"
 
-    print("=" * 60)
+    print("=" * 65)
     print(" 🤖 AGENT SERVEUR PRÊT (Dans la VM)")
-    print("=" * 60)
-    print(f"👉 ADRESSE IP VM : {local_ip}")
-    print(f"👉 PORT          : {port}")
-    print(f"🧠 MOTEURS DISPO : Terra (Défaut) | Lite Claude ({'OUI' if HAS_LITE_ENGINE else 'NON'}) | Ollama Local")
-    print(f"📩 MAIL TERRA    : {mail_cfg_str}")
-    if load_api_key():
-        print("🔑 Clé API       : Chargée depuis api_key.txt")
-    else:
-        print("🔑 Clé API       : Aucune (sera demandée au client)")
-    print("=" * 60)
-    print("En attente de connexion depuis le PC principal ou d'un email de mission...")
+    print("=" * 65)
+    print(f"👉 ADRESSE IP VM          : {local_ip}")
+    print(f"👉 PORT                   : {port}")
+    print(f"🧠 RÉFLEXION MISTRAL      : {mistral_state}")
+    print(f"👁️ MOTEURS D'ACTION       : Terra (Défaut) | Lite Claude ({'OUI' if HAS_LITE_ENGINE else 'NON'}) | Ollama")
+    print(f"📩 SERVICE MAIL TERRA     : {mail_cfg_str}")
+    print("=" * 65)
+    print("En attente de connexion de la bulle ou d'un email de mission...")
 
     while True:
         conn, addr = server.accept()
