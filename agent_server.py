@@ -6,6 +6,7 @@ import json
 import threading
 import time
 import os
+import re
 import shutil
 import imaplib
 import smtplib
@@ -164,7 +165,7 @@ ACTIVE_CLIENT_INSTANCE = None
 
 
 # ==============================================================================
-# 2. MODULE MISTRAL : CERVEAU AMONT D'ANALYSE & RÉFLEXION
+# 2. MODULE MISTRAL : CERVEAU AMONT (RÉDACTION & ÉCRITURE DIRECTE SUR DISQUE)
 # ==============================================================================
 def get_mistral_api_key() -> str:
     """Récupère la clé API Mistral depuis credentials.json ou les variables d'environnement."""
@@ -175,30 +176,78 @@ def get_mistral_api_key() -> str:
     return key or os.environ.get("MISTRAL_API_KEY", "").strip()
 
 
-def run_mistral_analysis(raw_task: str, app_instance=None) -> str:
+def extraire_et_ecrire_code_mistral(texte_mistral: str, app_instance=None) -> list[str]:
     """
-    Interroge l'API officielle de Mistral (via l'endpoint compatible OpenAI)
-    pour analyser la demande complexe, rédiger le code ou élaborer le plan d'action
-    avant de transmettre la feuille de route au moteur d'exécution visuelle (Terra/Claude).
+    Extrait les fichiers générés par Mistral et les écrit directement sur le disque de la VM.
+    Format attendu : ```html:C:\\chemin\\fichier.ext ou chemin en commentaire sur la 1ère ligne.
+    """
+    fichiers_ecrits = []
+    pattern = r"```(?:\w+)?(?::([^\n]+))?\n(.*?)```"
+    matches = re.findall(pattern, texte_mistral, re.DOTALL)
+
+    for path_header, code_body in matches:
+        target_path = path_header.strip() if path_header else ""
+
+        # Si le chemin est en commentaire sur la 1ère ligne du code (ex: // C:\... ou # C:\...)
+        if not target_path:
+            lines = code_body.strip().splitlines()
+            first_line = lines[0] if lines else ""
+            if any(first_line.startswith(p) for p in ["//", "#", "/*", "<!--"]):
+                possible_path = re.sub(r"^[/#*<!-]+", "", first_line).replace("-->", "").replace("*/", "").strip()
+                if any(sep in possible_path for sep in ["\\", "/"]) and "." in possible_path:
+                    target_path = possible_path
+                    code_body = "\n".join(lines[1:])
+
+        # Si un chemin valide a été détecté, écriture immédiate sur le disque de la VM
+        if target_path and any(sep in target_path for sep in ["\\", "/"]) and "." in target_path:
+            full_path = os.path.expanduser(os.path.expandvars(target_path))
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(full_path)), exist_ok=True)
+                with open(full_path, "w", encoding="utf-8") as f:
+                    f.write(code_body.strip())
+                fichiers_ecrits.append(full_path)
+                if app_instance:
+                    app_instance.log(f"⚡ [Code écrit sur disque par Mistral] : {full_path}\n", "system")
+            except Exception as err:
+                if app_instance:
+                    app_instance.log(f"⚠️ Erreur écriture fichier {full_path} : {err}\n", "error")
+
+    return fichiers_ecrits
+
+
+def run_mistral_analysis(raw_task: str, app_instance=None) -> tuple[str, list[str]]:
+    """
+    Interroge l'API Mistral pour analyser la tâche et écrire directement tout le code sur disque.
+    Retourne (consigne_pour_terra, liste_des_fichiers_ecrits).
+    En cas de dépassement de limite de tokens (429) ou d'absence de clé, bascule proprement sur GPT/Claude.
     """
     mistral_key = get_mistral_api_key()
     if not mistral_key:
-        return raw_task
+        return raw_task, []
 
     if app_instance:
-        app_instance.log("🧠 [Mistral AI] Analyse de la tâche et préparation du plan d'action...\n", "system")
+        app_instance.log("🧠 [Mistral AI] Analyse, génération du code et préparation du plan...\n", "system")
 
     try:
         client = OpenAI(
             base_url="https://api.mistral.ai/v1",
             api_key=mistral_key,
-            timeout=40.0
+            timeout=45.0
         )
+        desktop_dir = os.path.join(os.path.expanduser("~"), "Desktop")
         sys_prompt = (
-            "Tu es l'architecte logiciel et le superviseur technique d'un agent Windows d'exécution visuelle (Terra). "
-            "Analyse la consigne utilisateur suivante. Si du code (Python, GDScript, CLI Cisco, etc.) est requis, "
-            "rédige-le rigoureusement sans faute. Découpe la mission en étapes claires et concises que l'agent d'exécution "
-            "pourra appliquer sur l'écran de la VM sans hésitation. Reste direct et structuré."
+            "Tu es l'architecte logiciel principal et le codeur exclusif d'un agent Windows (Terra).\n"
+            "1. RÈGLE D'ÉCRITURE DIRECTE DU CODE : Tu dois rédiger 100% du code demandé toi-même. "
+            "Pour chaque fichier de code à créer ou modifier, mets OBLIGATOIREMENT son chemin absolu Windows "
+            f"(ex: sur le Bureau '{desktop_dir}\\nom_fichier.ext') juste après les deux-points de la balise Markdown.\n"
+            f"Exemple strict :\n```html:{desktop_dir}\\bonjour.html\n<!DOCTYPE html>...\n```\n"
+            "Le serveur interceptera ton bloc et écrira le fichier directement sur le disque.\n"
+            "2. RÈGLE STRICTE POUR L'AGENT TERRA : Terra a l'INTERDICTION ABSOLUE de taper ou modifier du code. "
+            "Ne lui demande JAMAIS de faire Ctrl+N, de taper du code ou d'utiliser write_clipboard pour coder. "
+            "Donne-lui uniquement des ordres de navigation (ex: ouvrir VS Code sur le fichier déjà créé, "
+            "ouvrir le fichier dans Brave pour vérifier l'affichage visuel, tester les boutons).\n"
+            "3. INTERDICTION DE FERMER LES FENÊTRES : Ne demande JAMAIS à Terra de fermer les applications ou d'utiliser Alt+F4. "
+            "Le résultat final doit toujours rester ouvert à l'écran."
         )
         response = client.chat.completions.create(
             model="mistral-large-latest",
@@ -207,18 +256,36 @@ def run_mistral_analysis(raw_task: str, app_instance=None) -> str:
                 {"role": "user", "content": raw_task}
             ],
             temperature=0.2,
-            max_tokens=1400
+            max_tokens=2000
         )
         plan = (response.choices[0].message.content or "").strip()
-        if plan:
-            if app_instance:
-                app_instance.log(f"📋 [Plan Mistral généré] : {plan[:160]}...\n", "agent")
-            return f"{raw_task}\n\n[PLAN ET INSTRUCTIONS DÉTAILLÉES PRÉPARÉES PAR MISTRAL] :\n{plan}"
+        if not plan:
+            return raw_task, []
+
+        # Écriture directe sur le disque de tous les blocs de code produits par Mistral
+        fichiers = extraire_et_ecrire_code_mistral(plan, app_instance=app_instance)
+
+        # On retire les gros blocs de code du texte envoyé à Terra pour économiser les tokens OpenRouter
+        plan_sans_code = re.sub(r"```.*?```", "[Code déjà écrit sur le disque par Mistral]", plan, flags=re.DOTALL)
+
+        if app_instance:
+            app_instance.log(f"📋 [Plan Mistral prêt] ({len(fichiers)} fichier(s) écrit(s) sur disque).\n", "agent")
+
+        consigne_terra = (
+            f"DEMANDE INITIALE : {raw_task}\n\n"
+            f"FICHIERS DÉJÀ CRÉÉS SUR DISQUE PAR MISTRAL : {', '.join(fichiers) if fichiers else 'Aucun fichier direct'}\n\n"
+            "CONSIGNE STRICTE POUR TERRA :\n"
+            "- Le code est DÉJÀ écrit sur le disque par Mistral. Tu as l'INTERDICTION ABSOLUE de coder, d'éditer le texte dans VS Code ou de recréer le fichier.\n"
+            "- Si l'utilisateur a demandé d'ouvrir VS Code ou le navigateur pour voir/valider le fichier, ouvre simplement le fichier existant, vérifie visuellement le rendu, et ne touche plus au code.\n"
+            "- INTERDICTION ABSOLUE de fermer les fenêtres (pas de Alt+F4). Laisse tout ouvert et appelle finish_task dès que c'est vérifié.\n\n"
+            f"FEUILLE DE ROUTE DE NAVIGATION :\n{plan_sans_code}"
+        )
+        return consigne_terra, fichiers
+
     except Exception as e:
         if app_instance:
-            app_instance.log(f"⚠️ Mistral indisponible ({e}). Bascule directe sur le moteur d'exécution standard.\n", "error")
-
-    return raw_task
+            app_instance.log(f"⚠️ Limite de tokens ou erreur Mistral ({e}). Bascule automatique sur le moteur GPT/Claude.\n", "error")
+        return raw_task, []
 
 
 # ==============================================================================
@@ -370,13 +437,28 @@ def start_agent_task(task: str, app_instance: RemoteAppInstance, on_complete=Non
 
     def full_workflow():
         try:
-            # Étape 1 : Réflexion & élaboration du plan par Mistral si la clé est fournie
-            enriched_task = run_mistral_analysis(task, app_instance=app_instance)
+            # Étape 1 : Mistral rédige et écrit les fichiers de code directement sur le disque
+            enriched_task, fichiers_crees = run_mistral_analysis(task, app_instance=app_instance)
 
             if app_instance.stop_requested:
                 return
 
-            # Étape 2 : Injection sécurisée du compte principal si présent
+            # Étape 2 : Si Mistral a écrit le code et qu'aucune action visuelle n'est requise,
+            # on s'arrête immédiatement (0 token OpenRouter dépensé !)
+            t_low = task.lower()
+            mots_cles_ui = [
+                "ouvre", "lance", "valide", "vérifie", "verifie", "affiche", "regarde",
+                "navigateur", "brave", "vscode", "vs code", "clique", "teste", "écran", "ecran"
+            ]
+            if fichiers_crees and not any(w in t_low for w in mots_cles_ui):
+                fichiers_str = ", ".join(fichiers_crees)
+                app_instance.log(
+                    f"✅ Mission accomplie : Code généré et enregistré par Mistral ({fichiers_str}) sans dépenser de tokens GPT.\n",
+                    "system"
+                )
+                return
+
+            # Étape 3 : Injection sécurisée du compte principal si présent
             main_email = creds.get("main_account_email", "").strip()
             main_pwd = creds.get("main_account_password", "").strip()
             if main_email and main_email.lower() not in enriched_task.lower():
@@ -385,14 +467,14 @@ def start_agent_task(task: str, app_instance: RemoteAppInstance, on_complete=Non
                     f"utilise '{main_email}'" + (f" avec le mot de passe '{main_pwd}'." if main_pwd else ".]")
                 )
 
-            # Étape 3 : Détection de profil pour l'exécuteur
+            # Étape 4 : Détection de profil pour l'exécuteur
             try:
-                app_instance.shared_state["data"] = active_engine.prepare_task_data(enriched_task)
+                app_instance.shared_state["data"] = active_engine.prepare_task_data(task)
             except Exception:
                 app_instance.shared_state["data"] = None
             app_instance.shared_state["done"] = True
 
-            # Étape 4 : Exécution physique à l'écran (Terra / Claude / Ollama)
+            # Étape 5 : Exécution visuelle / navigation uniquement (Terra / Claude / Ollama)
             active_engine.run_agent(enriched_task, app_instance)
         finally:
             app_instance.agent_running = False
@@ -611,7 +693,7 @@ def handle_client(conn, addr):
     app_instance.log(
         "✅ Connecté au serveur de la VM !\n"
         f"⚙️ Moteurs : Terra | Lite Claude ({'OUI' if HAS_LITE_ENGINE else 'NON'}) | Ollama\n"
-        f"🧠 Réflexion Mistral amont : {'Connecté (Tandem Actif)' if mistral_ok else 'Non configuré (Exécution directe)'} | 📩 Mail : {'Actif' if mail_ok else 'Inactif'}\n",
+        f"🧠 Réflexion & Code Mistral : {'Connecté (Écriture disque directe)' if mistral_ok else 'Non configuré'} | 📩 Mail : {'Actif' if mail_ok else 'Inactif'}\n",
         "system"
     )
 
@@ -685,7 +767,6 @@ def handle_client(conn, addr):
                         save_api_key(or_key)
                         app_instance.awaiting_api_key = False
 
-                    # Si l'utilisateur a rentré sa clé Mistral dans l'onglet API
                     if msg.get("extra_api_name", "").lower().startswith("mistral") and msg.get("extra_api_key"):
                         msg["mistral_api_key"] = msg["extra_api_key"].strip()
 
@@ -700,7 +781,7 @@ def handle_client(conn, addr):
                     m_ready = bool(get_mistral_api_key())
                     MAIL_WATCHER.last_error_logged = ""
                     app_instance.log(
-                        f"✅ Paramètres synchronisés (Mode: {new_mode.upper()} | Réflexion Mistral: {'ACTIVE' if m_ready else 'OFF'} | Mail Terra: {'OK' if t_mail else 'OFF'}).\n",
+                        f"✅ Paramètres synchronisés (Mode: {new_mode.upper()} | Codeur Mistral: {'ACTIF' if m_ready else 'OFF'} | Mail Terra: {'OK' if t_mail else 'OFF'}).\n",
                         "system"
                     )
 
@@ -795,14 +876,14 @@ if __name__ == "__main__":
 
     init_creds = load_credentials()
     mail_cfg_str = init_creds.get("terra_mail_address") or "Non configuré"
-    mistral_state = "Actif" if get_mistral_api_key() else "Inactif"
+    mistral_state = "Actif (Écriture disque directe)" if get_mistral_api_key() else "Inactif"
 
     print("=" * 65)
     print(" 🤖 AGENT SERVEUR PRÊT (Dans la VM)")
     print("=" * 65)
     print(f"👉 ADRESSE IP VM          : {local_ip}")
     print(f"👉 PORT                   : {port}")
-    print(f"🧠 RÉFLEXION MISTRAL      : {mistral_state}")
+    print(f"🧠 CODEUR MISTRAL         : {mistral_state}")
     print(f"👁️ MOTEURS D'ACTION       : Terra (Défaut) | Lite Claude ({'OUI' if HAS_LITE_ENGINE else 'NON'}) | Ollama")
     print(f"📩 SERVICE MAIL TERRA     : {mail_cfg_str}")
     print("=" * 65)
