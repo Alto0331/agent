@@ -248,6 +248,8 @@ def run_mistral_analysis(raw_task: str, app_instance=None) -> tuple[str, list[st
             "ouvrir le fichier dans Brave pour vérifier l'affichage visuel, tester les boutons).\n"
             "3. INTERDICTION DE FERMER LES FENÊTRES : Ne demande JAMAIS à Terra de fermer les applications ou d'utiliser Alt+F4. "
             "Le résultat final doit toujours rester ouvert à l'écran."
+            "4. RAPPORT FINAL : termine ta consigne pour Terra par : 'Termine en écrivant dans le chat RÉSULTAT: <résumé avec liens et preuves>'. "
+            "Mistral relira ensuite ce rapport pour vérifier que tout s'est bien passé et pourra redéléguer une étape à Terra si besoin."
         )
         response = client.chat.completions.create(
             model="mistral-large-latest",
@@ -480,6 +482,29 @@ def start_agent_task(task: str, app_instance: RemoteAppInstance, on_complete=Non
 
             # Étape 5 : Exécution visuelle / navigation uniquement (Terra / Claude / Ollama)
             active_engine.run_agent(enriched_task, app_instance)
+
+            # Étape 6 : Boucle tandem — Mistral vérifie le rapport de Terra et peut redéléguer une étape
+            if use_mistral and not app_instance.stop_requested:
+                historique = [
+                    f"Mission initiale : {task}",
+                    f"Fichiers/dossiers créés par Mistral : {', '.join(fichiers_crees) or 'aucun'}",
+                ]
+                for step in range(TANDEM_MAX_STEPS):
+                    if app_instance.stop_requested:
+                        return
+                    logs_terra = "\n".join(app_instance.collected_logs[-20:])
+                    historique.append(f"--- Étape Terra {step + 1} (logs) ---\n{logs_terra}")
+                    decision = run_mistral_next_step(task, historique, app_instance)
+                    action = str(decision.get("action", "finish")).lower()
+                    consigne = str(decision.get("consigne", "")).strip()
+                    if action == "terra" and consigne:
+                        app_instance.log(f"🔁 [Tandem étape {step + 1}] Mistral redélègue à Terra : {consigne[:150]}\n", "system")
+                        app_instance.collected_logs.clear()
+                        active_engine.run_agent(consigne, app_instance)
+                        continue
+                    resume = str(decision.get("resume", "")).strip() or "Mission terminée et vérifiée."
+                    app_instance.log(f"✅ Mission accomplie : {resume}\n", "system")
+                    return
         finally:
             app_instance.agent_running = False
             if callable(on_complete):
@@ -731,6 +756,53 @@ def handle_update_vm(app_instance, branch: str):
         os.execv(sys.executable, [sys.executable, os.path.join(BASE_DIR, "agent_server.py")] + sys.argv[1:])
     except Exception as e:
         app_instance.log(f"❌ Échec de la mise à jour de la VM : {e}\n", "error")
+
+
+TANDEM_MAX_STEPS = 4
+
+
+def run_mistral_next_step(raw_task: str, historique: list[str], app_instance=None) -> dict:
+    """
+    Boucle tandem : Mistral (chef d'équipe) reçoit le rapport de Terra et décide de la
+    prochaine action. Retourne {"action": "terra"|"finish", "consigne": ..., "resume": ...}.
+    """
+    mistral_key = get_mistral_api_key()
+    if not mistral_key:
+        return {"action": "finish", "resume": "Pas de clé Mistral : mission terminée après exécution de Terra.", "consigne": ""}
+    if app_instance:
+        app_instance.log("🧠 [Tandem] Mistral relit le rapport de Terra et décide de la suite...\n", "system")
+    try:
+        client = OpenAI(base_url="https://api.mistral.ai/v1", api_key=mistral_key, timeout=45.0)
+        sys_prompt = (
+            "Tu es le chef d'équipe d'un tandem d'agents sur une VM Windows.\n"
+            "Toi (Mistral) tu crées/lis des fichiers et dossiers sur le disque de la VM (tu peux créer un dossier en y écrivant un fichier) et tu prends les décisions.\n"
+            "Terra (GPT) possède le navigateur Brave : il fait les actions web (GitHub, connexions, formulaires) et les validations visuelles (rendu de page, superposition, PDF).\n\n"
+            "MISSION DONNÉE PAR L'UTILISATEUR :\n" + raw_task + "\n\n"
+            "HISTORIQUE DES ÉTAPES DÉJÀ RÉALISÉES :\n" + "\n".join(historique) + "\n\n"
+            "Décide de la PROCHAINE action. Réponds UNIQUEMENT avec un JSON strict, sans aucun texte autour :\n"
+            '- {"action": "terra", "consigne": "..."} pour déléguer une étape à Terra (ex: aller vérifier un lien/repo GitHub, valider un rendu visuel, se connecter, corriger un détail). La consigne doit être autonome et se terminer par : Termine en écrivant dans le chat RÉSULTAT: <résumé avec liens et preuves>.\n'
+            '- {"action": "finish", "resume": "..."} uniquement si la mission est accomplie ET vérifiée grâce à l\'historique (ne termine pas sur un doute).'
+        )
+        resp = client.chat.completions.create(
+            model="mistral-large-latest",
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": "Prochaine action ? (JSON uniquement)"},
+            ],
+            temperature=0.2,
+            max_tokens=1000,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        raw = re.sub(r"^```(?:json)?", "", raw).strip()
+        raw = re.sub(r"```$", "", raw).strip()
+        data = json.loads(raw)
+        if not isinstance(data, dict) or "action" not in data:
+            raise ValueError("JSON non conforme")
+        return data
+    except Exception as e:
+        if app_instance:
+            app_instance.log(f"⚠️ [Tandem] Réponse Mistral illisible ({e}) : on considère la mission terminée.\n", "system")
+        return {"action": "finish", "resume": "Mission terminée après exécution de Terra (vérification auto indisponible).", "consigne": ""}
 
 
 def ask_mistral_direct(question: str, app_instance=None):
