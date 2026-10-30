@@ -25,8 +25,12 @@ if %errorlevel% neq 0 (
     echo [2/3] Python deja installe.
 )
 
-:: 4. Lancement du serveur qui installera automatiquement les paquets pip et Brave
-echo [3/3] Demarrage de agent_server.py...
+:: 4. Installation de Mistral Vibe (agent Vibe en direct dans la VM, commande /vibe)
+python -m pip install -U mistral-vibe >nul 2>&1
+echo [4/4] Vibe installe dans la VM (mode /vibe disponible).
+
+:: 5. Lancement du serveur qui installera automatiquement les paquets pip et Brave
+echo [5/5] Demarrage de agent_server.py...
 cd /d "%~dp0"
 python agent_server.py
 pause

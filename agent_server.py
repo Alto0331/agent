@@ -805,6 +805,43 @@ def run_mistral_next_step(raw_task: str, historique: list[str], app_instance=Non
         return {"action": "finish", "resume": "Mission terminée après exécution de Terra (vérification auto indisponible).", "consigne": ""}
 
 
+def _vibe_executable() -> str | None:
+    cand = os.path.join(os.path.dirname(sys.executable), "Scripts", "vibe.exe")
+    if os.path.exists(cand):
+        return cand
+    return shutil.which("vibe")
+
+
+def run_vibe_task(mission: str, app_instance):
+    """Lance le CLI Vibe (Mistral) en mode headless DANS la VM, dans la session utilisateur
+    courante du serveur : Vibe a alors un accès direct à la VM (fichiers, process, etc.).
+    Sa sortie est streamée dans le chat. Fallback sur le tandem classique si Vibe absent."""
+    exe = _vibe_executable()
+    if not exe:
+        app_instance.log("⚠️ Vibe non installé dans la VM (faire: pip install mistral-vibe). Fallback sur le tandem Mistral->Terra.\n", "error")
+        start_agent_task(mission, app_instance)
+        return
+    env = os.environ.copy()
+    mkey = get_mistral_api_key()
+    if mkey:
+        env["MISTRAL_API_KEY"] = mkey
+    app_instance.log(f"🟣 [Vibe] Lancement de Vibe en direct dans la VM (compte utilisateur) : {mission[:120]}\n", "system")
+    try:
+        proc = subprocess.Popen(
+            [exe, "-p", mission, "--output", "text", "--max-turns", "40", "--workdir", BASE_DIR],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env, cwd=BASE_DIR,
+        )
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                app_instance.log(f"[Vibe] {line}\n", "agent")
+        rc = proc.wait()
+        app_instance.log(f"🟣 [Vibe] Terminé (code {rc}).\n", "system")
+    except Exception as e:
+        app_instance.log(f"❌ Erreur lancement Vibe : {e}\n", "error")
+        start_agent_task(mission, app_instance)
+
+
 def ask_mistral_direct(question: str, app_instance=None):
     """Chat direct avec Mistral depuis l'app (sans lancer Terra ni passer par le mail)."""
     key = get_mistral_api_key()
@@ -938,6 +975,11 @@ def handle_client(conn, addr):
                 elif msg_type == "check_update":
                     threading.Thread(target=send_update_status, args=(app_instance,), daemon=True).start()
 
+                elif msg_type == "vibe_task":
+                    vibe_mission = str(msg.get("content", "")).strip()
+                    if vibe_mission:
+                        threading.Thread(target=run_vibe_task, args=(vibe_mission, app_instance), daemon=True).start()
+
                 elif msg_type == "update_vm":
                     branch = str(msg.get("branch", "beta")).strip().lower()
                     if branch not in ("beta", "main"):
@@ -967,6 +1009,10 @@ def handle_client(conn, addr):
 
                     # --- Adressage direct à un agent depuis le chat de l'app (sans passer par le mail) ---
                     low = content.lower()
+                    if low.startswith("/vibe "):
+                        vibe_mission = content.split(" ", 1)[1].strip()
+                        threading.Thread(target=run_vibe_task, args=(vibe_mission, app_instance), daemon=True).start()
+                        continue
                     if low.startswith("/mistral ") or low.startswith("/m "):
                         question = content.split(" ", 1)[1].strip()
                         threading.Thread(target=ask_mistral_direct, args=(question, app_instance), daemon=True).start()

@@ -240,7 +240,7 @@ class AgentClientApp:
 
         tk.Label(
             self.bottom_frame,
-            text="💬 /mistral <msg> = parler à Mistral direct · /terra <mission> = lancer Terra sans Mistral · pendant une mission, ton prochain message répond à l'agent",
+            text="💬 /vibe <mission> = lancer Vibe en direct dans la VM · /mistral <msg> = parler à Mistral · /terra <mission> = lancer Terra sans Mistral · pendant une mission, ton prochain message répond à l'agent",
             fg="#64748b", bg="#1f2937", font=("Segoe UI", 7), wraplength=420, justify=tk.LEFT
         ).pack(fill=tk.X, pady=(0, 4))
         self.input_entry.bind("<Return>", lambda e: self.send_instruction())
