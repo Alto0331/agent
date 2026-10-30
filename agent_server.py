@@ -413,7 +413,7 @@ def get_active_engine(app_instance: RemoteAppInstance):
     return engine_terra
 
 
-def start_agent_task(task: str, app_instance: RemoteAppInstance, on_complete=None):
+def start_agent_task(task: str, app_instance: RemoteAppInstance, on_complete=None, use_mistral=True):
     creds = load_credentials()
     mode = getattr(app_instance, "engine_mode", "terra")
     active_engine = get_active_engine(app_instance)
@@ -438,7 +438,11 @@ def start_agent_task(task: str, app_instance: RemoteAppInstance, on_complete=Non
     def full_workflow():
         try:
             # Étape 1 : Mistral rédige et écrit les fichiers de code directement sur le disque
-            enriched_task, fichiers_crees = run_mistral_analysis(task, app_instance=app_instance)
+            # (désactivable avec use_mistral=False, ex: mission directe /terra depuis le chat)
+            if use_mistral:
+                enriched_task, fichiers_crees = run_mistral_analysis(task, app_instance=app_instance)
+            else:
+                enriched_task, fichiers_crees = task, []
 
             if app_instance.stop_requested:
                 return
@@ -729,6 +733,31 @@ def handle_update_vm(app_instance, branch: str):
         app_instance.log(f"❌ Échec de la mise à jour de la VM : {e}\n", "error")
 
 
+def ask_mistral_direct(question: str, app_instance=None):
+    """Chat direct avec Mistral depuis l'app (sans lancer Terra ni passer par le mail)."""
+    key = get_mistral_api_key()
+    if not key:
+        if app_instance:
+            app_instance.log("⚠️ Clé API Mistral absente : ajoute-la dans ⚙️ Paramètres > ✨ Mistral (Relai).\n", "error")
+        return
+    if app_instance:
+        app_instance.log(f"💬 [Mistral] {question}\n", "user")
+    try:
+        client = OpenAI(base_url="https://api.mistral.ai/v1", api_key=key, timeout=45.0)
+        resp = client.chat.completions.create(
+            model="mistral-large-latest",
+            messages=[{"role": "user", "content": question}],
+            temperature=0.4,
+            max_tokens=1200,
+        )
+        answer = (resp.choices[0].message.content or "").strip()
+        if app_instance:
+            app_instance.log(f"✨ [Mistral] {answer}\n", "agent")
+    except Exception as e:
+        if app_instance:
+            app_instance.log(f"❌ Erreur appel Mistral : {e}\n", "error")
+
+
 def handle_client(conn, addr):
     global ACTIVE_CLIENT_INSTANCE
     print(f"[Réseau] PC Principal connecté depuis {addr}")
@@ -862,6 +891,18 @@ def handle_client(conn, addr):
                         app_instance.engine_mode = "local"
                         configure_runtime_for_mode("local")
                         app_instance.log("🦙 Mode LOCAL Ollama activé.\n", "system")
+                        continue
+
+                    # --- Adressage direct à un agent depuis le chat de l'app (sans passer par le mail) ---
+                    low = content.lower()
+                    if low.startswith("/mistral ") or low.startswith("/m "):
+                        question = content.split(" ", 1)[1].strip()
+                        threading.Thread(target=ask_mistral_direct, args=(question, app_instance), daemon=True).start()
+                        continue
+                    if low.startswith("/terra ") or low.startswith("/gpt "):
+                        target_task = content.split(" ", 1)[1].strip()
+                        app_instance.log(f"🎯 Mission directe pour l'exécuteur : {target_task[:80]}\n", "system")
+                        start_agent_task(target_task, app_instance, use_mistral=False)
                         continue
 
                     if app_instance.awaiting_api_key and app_instance.engine_mode != "local":
