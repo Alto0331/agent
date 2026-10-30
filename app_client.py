@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog
 
@@ -31,6 +32,7 @@ class AgentClientApp:
         self.connected = False
         self.submenu_visible = False
         self.is_minimized_to_bubble = False
+        self._vm_update_info = None
 
         # Coordonnées pour le glisser-déposer de la fenêtre et de la bulle
         self._drag_x = 0
@@ -579,34 +581,60 @@ class AgentClientApp:
         if not os.path.isdir(os.path.join(APP_DIR, ".git")):
             self.append_log("⚠️ Mise à jour impossible : ce dossier n'est pas un clone git.\n", "error")
             return
-        self.append_log("🔄 Vérification des mises à jour sur GitHub (beta & release)...\n", "system")
+        self.append_log("🔄 Vérification des mises à jour sur GitHub (PC + VM : beta & release)...\n", "system")
         threading.Thread(target=self._check_updates_worker, daemon=True).start()
 
     def _check_updates_worker(self):
         try:
             self._git("fetch", "origin")
-            options = []
-            for branch, label in (("beta", "🧪 Beta"), ("main", "🚀 Release")):
+            local = {}
+            for branch in ("beta", "main"):
                 count = self._git("rev-list", "--count", f"HEAD..origin/{branch}").stdout.strip()
                 try:
-                    n = int(count)
+                    local[branch] = int(count)
                 except ValueError:
-                    n = 0
-                if n > 0:
-                    options.append((f"{label} (+{n} commit{'s' if n > 1 else ''})", branch))
-            self.root.after(0, lambda: self._on_updates_checked(options))
+                    local[branch] = 0
+            vm = None
+            if self.connected and self.sock:
+                self._vm_update_info = None
+                self._send_json({"type": "check_update"})
+                for _ in range(120):  # attend la réponse de la VM jusqu'à 12s
+                    if self._vm_update_info is not None:
+                        break
+                    time.sleep(0.1)
+                vm = self._vm_update_info
+            self.root.after(0, lambda: self._on_updates_checked(local, vm))
         except Exception as e:
             self.root.after(0, lambda err=e: self.append_log(f"⚠️ Erreur vérification mises à jour : {err}\n", "error"))
 
-    def _on_updates_checked(self, options):
+    def _on_updates_checked(self, local: dict, vm):
+        options = []
+        for branch, label in (("beta", "🧪 Beta"), ("main", "🚀 Release")):
+            n_pc = local.get(branch, 0)
+            n_vm = vm.get(branch, 0) if isinstance(vm, dict) else 0
+            if n_pc > 0 or n_vm > 0:
+                parts = []
+                if n_pc > 0:
+                    parts.append(f"+{n_pc} commit{'s' if n_pc > 1 else ''} sur le PC")
+                if n_vm > 0:
+                    parts.append(f"+{n_vm} commit{'s' if n_vm > 1 else ''} sur la VM")
+                options.append((f"{label} ({', '.join(parts)})", branch))
         if not options:
-            self.append_log("✅ L'app est à jour (aucune nouvelle version sur beta ni release).\n", "system")
+            if vm is None and self.connected:
+                self.append_log("✅ PC à jour. ⚠️ VM : état inconnu (serveur trop ancien pour répondre ?).\n", "system")
+            else:
+                self.append_log("✅ Tout est à jour (PC & VM, aucune nouvelle version beta/release).\n", "system")
             return
         branch = self._ask_update_choice(options)
         if not branch:
             self.append_log("ℹ️ Mise à jour annulée.\n", "system")
             return
-        self.append_log(f"⬇️ Mise à jour vers '{branch}' en cours...\n", "system")
+        self.append_log(f"⬇️ Mise à jour vers '{branch}' (PC + VM)...\n", "system")
+        if self.connected and self.sock:
+            if self._send_json({"type": "update_vm", "branch": branch}):
+                self.append_log(f"📡 Ordre envoyé à la VM ('{branch}') : elle se met à jour et redémarre seule.\n", "system")
+        else:
+            self.append_log("ℹ️ VM non connectée : seule l'app PC sera mise à jour.\n", "system")
         threading.Thread(target=self._apply_update_worker, args=(branch,), daemon=True).start()
 
     def _ask_update_choice(self, options) -> str | None:
@@ -646,7 +674,7 @@ class AgentClientApp:
             r = self._git("pull", "--ff-only", "origin", branch)
             if r.returncode != 0:
                 raise RuntimeError((r.stderr or r.stdout).strip())
-            self.root.after(0, lambda: self.append_log(f"✅ Mise à jour '{branch}' appliquée. Redémarrage de l'app...\n", "system"))
+            self.root.after(0, lambda: self.append_log(f"✅ Mise à jour '{branch}' appliquée sur le PC. Redémarrage de l'app (reconnexion auto à la VM si configurée)...\n", "system"))
             self.root.after(800, self._restart_app)
         except Exception as e:
             self.root.after(0, lambda err=e: self.append_log(f"❌ Échec de la mise à jour : {err}\n", "error"))
@@ -855,6 +883,9 @@ class AgentClientApp:
                         continue
                     try:
                         msg = json.loads(line)
+                        if msg.get("type") == "update_status":
+                            self._vm_update_info = msg.get("vm")
+                            continue
                         txt = msg.get("text", "")
                         tag = msg.get("tag", "system")
                         self.root.after(0, lambda t=txt, tg=tag: self.append_log(t, tg))

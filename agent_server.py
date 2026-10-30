@@ -680,6 +680,55 @@ MAIL_WATCHER = MailWatcher()
 # ==============================================================================
 # 6. GESTION DU CLIENT TCP (APP CLIENT <-> VM)
 # ==============================================================================
+def _git(*args) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", BASE_DIR, *args], capture_output=True, text=True)
+
+
+def send_update_status(app_instance):
+    """Envoie au client l'état git de la VM (commits en avance sur beta/main)."""
+    try:
+        _git("fetch", "origin")
+        info = {
+            "branch": _git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip(),
+            "head": _git("rev-parse", "--short", "HEAD").stdout.strip(),
+        }
+        for b in ("beta", "main"):
+            out = _git("rev-list", "--count", f"HEAD..origin/{b}").stdout.strip()
+            try:
+                info[b] = int(out)
+            except ValueError:
+                info[b] = 0
+        payload = {"type": "update_status", "vm": info}
+    except Exception as e:
+        payload = {"type": "update_status", "vm": {"error": str(e)}}
+    target = app_instance.conn or (ACTIVE_CLIENT_INSTANCE.conn if ACTIVE_CLIENT_INSTANCE else None)
+    if target is not None:
+        try:
+            target.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+        except Exception:
+            pass
+
+
+def handle_update_vm(app_instance, branch: str):
+    """Met à jour les fichiers de la VM sur la branche choisie puis redémarre le serveur."""
+    try:
+        app_instance.log(f"⬇️ Mise à jour de la VM vers '{branch}' en cours...\n", "system")
+        if _git("status", "--porcelain").stdout.strip():
+            _git("stash", "push", "-m", "auto-update VM")
+            app_instance.log("💾 Modifications locales de la VM mises de côté (git stash).\n", "system")
+        r = _git("checkout", branch)
+        if r.returncode != 0:
+            raise RuntimeError((r.stderr or r.stdout).strip())
+        r = _git("pull", "--ff-only", "origin", branch)
+        if r.returncode != 0:
+            raise RuntimeError((r.stderr or r.stdout).strip())
+        app_instance.log(f"✅ VM mise à jour sur '{branch}'. Redémarrage du serveur...\n", "system")
+        time.sleep(1.5)  # laisse le temps au log d'arriver chez le client
+        os.execv(sys.executable, [sys.executable, os.path.join(BASE_DIR, "agent_server.py")] + sys.argv[1:])
+    except Exception as e:
+        app_instance.log(f"❌ Échec de la mise à jour de la VM : {e}\n", "error")
+
+
 def handle_client(conn, addr):
     global ACTIVE_CLIENT_INSTANCE
     print(f"[Réseau] PC Principal connecté depuis {addr}")
@@ -784,6 +833,16 @@ def handle_client(conn, addr):
                         f"✅ Paramètres synchronisés (Mode: {new_mode.upper()} | Codeur Mistral: {'ACTIF' if m_ready else 'OFF'} | Mail Terra: {'OK' if t_mail else 'OFF'}).\n",
                         "system"
                     )
+
+                elif msg_type == "check_update":
+                    threading.Thread(target=send_update_status, args=(app_instance,), daemon=True).start()
+
+                elif msg_type == "update_vm":
+                    branch = str(msg.get("branch", "beta")).strip().lower()
+                    if branch not in ("beta", "main"):
+                        branch = "beta"
+                    app_instance.log(f"📡 Ordre de mise à jour reçu pour la branche '{branch}'.\n", "system")
+                    threading.Thread(target=handle_update_vm, args=(app_instance, branch), daemon=True).start()
 
                 elif msg_type in ["instruction", "task"]:
                     content = msg.get("content", "").strip()

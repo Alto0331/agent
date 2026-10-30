@@ -1,3 +1,5 @@
 ﻿api_key.txt
+client_config.json
+credentials.json
 __pycache__/
 *.pyc
