@@ -66,6 +66,8 @@ class AgentClientApp:
             "oauth_token_or_path": "",
             "extra_api_name": "Tavily / Google AI",
             "extra_api_key": "",
+            # Catégorie 5 : Relai Mistral (clé perso : Mistral devient le cerveau à la place de GPT, délégation par mail vers Terra)
+            "mistral_api_key": "",
             # Catégorie 3 : Modèle Local Ollama
             "use_ollama": False,
             "ollama_url": "http://localhost:11434",
@@ -414,6 +416,34 @@ class AgentClientApp:
             fg="#94a3b8", bg="#1e293b", justify=tk.LEFT, font=("Segoe UI", 7)
         ).pack(anchor="w", pady=(4, 0))
 
+        # --- ONGLET 5 : RELAI MISTRAL (CERVEAU AMONT + DÉLÉGATION MAIL VERS TERRA) ---
+        tab_mistral = tk.Frame(self.notebook, bg="#1e293b", padx=8, pady=8)
+        self.notebook.add(tab_mistral, text="✨ Mistral (Relai)")
+
+        tk.Label(
+            tab_mistral,
+            text=(
+                "💡 Ta clé API Mistral perso. Si elle est renseignée, Mistral prend le relai\n"
+                "comme cerveau à la place de GPT et peut envoyer une requête par mail à Terra\n"
+                "(ex: créer un repo GitHub, valider un rendu de site/PDF), puis reprendre la tâche.\n"
+                "Si le champ est vide, l'agent continue de fonctionner normalement."
+            ),
+            fg="#94a3b8", bg="#1e293b", justify=tk.LEFT, font=("Segoe UI", 7)
+        ).pack(fill=tk.X, pady=(0, 6))
+
+        g_mistral = tk.Frame(tab_mistral, bg="#1e293b")
+        g_mistral.pack(fill=tk.X)
+
+        tk.Label(g_mistral, text="Clé API Mistral :", fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8, "bold")).grid(row=0, column=0, sticky="w", pady=3)
+        self.var_mistral_key = tk.StringVar(value=self.config.get("mistral_api_key", ""))
+        self.ent_mistral_key = tk.Entry(g_mistral, textvariable=self.var_mistral_key, show="*", bg="#0f172a", fg="white", insertbackground="white", relief=tk.FLAT)
+        self.ent_mistral_key.grid(row=0, column=1, sticky="ew", padx=6, pady=3, ipady=2)
+        tk.Button(
+            g_mistral, text="👁", bg="#334155", fg="white", bd=0, padx=6,
+            command=lambda: self._toggle_password_visibility(self.ent_mistral_key)
+        ).grid(row=0, column=2, padx=2)
+        g_mistral.columnconfigure(1, weight=1)
+
         # --- BOUTON GLOBAL DE SAUVEGARDE & SYNCHRONISATION ---
         tk.Button(
             self.submenu_frame,
@@ -464,6 +494,9 @@ class AgentClientApp:
         self.config["extra_api_name"] = self.var_extra_name.get().strip()
         self.config["extra_api_key"] = self.var_extra_key.get().strip()
 
+        # 5. Relai Mistral (clé perso)
+        self.config["mistral_api_key"] = self.var_mistral_key.get().strip()
+
         # 3. Modèle Local Ollama
         self.config["use_ollama"] = bool(self.var_use_ollama.get())
         self.config["ollama_url"] = self.var_ollama_url.get().strip() or "http://localhost:11434"
@@ -509,6 +542,7 @@ class AgentClientApp:
             "oauth_raw": oauth_json_content or oauth_val,
             "extra_api_name": self.config["extra_api_name"],
             "extra_api_key": self.config["extra_api_key"],
+            "mistral_api_key": self.config["mistral_api_key"],
             # Ollama Local
             "use_ollama": self.config["use_ollama"],
             "ollama_url": self.config["ollama_url"],
@@ -523,7 +557,7 @@ class AgentClientApp:
         if self.connected and self.sock:
             self._send_json(payload)
             self._send_json({"type": "set_mode", "mode": self.engine_mode})
-            self.append_log("⚙️ Tous les paramètres (Compte, API, Ollama, Mail Terra) sont synchronisés avec la VM.\n", "system")
+            self.append_log("⚙️ Tous les paramètres (Compte, API, Ollama, Mail Terra, Mistral) sont synchronisés avec la VM.\n", "system")
         else:
             self.append_log("💾 Paramètres sauvegardés localement (connecte-toi à la VM pour les synchroniser).\n", "system")
 

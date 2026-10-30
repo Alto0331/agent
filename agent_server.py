@@ -767,7 +767,7 @@ def handle_client(conn, addr):
                         save_api_key(or_key)
                         app_instance.awaiting_api_key = False
 
-                    if msg.get("extra_api_name", "").lower().startswith("mistral") and msg.get("extra_api_key"):
+                    if not str(msg.get("mistral_api_key", "")).strip() and msg.get("extra_api_name", "").lower().startswith("mistral") and msg.get("extra_api_key"):
                         msg["mistral_api_key"] = msg["extra_api_key"].strip()
 
                     saved = save_credentials(msg)
