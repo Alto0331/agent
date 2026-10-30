@@ -6,12 +6,15 @@ app_client.py — Interface Client (Bulle flottante 🤖 + Connexion IP VM + Swi
 import os
 import json
 import socket
+import subprocess
+import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_config.json")
 DEFAULT_PORT = 65432
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 class AgentClientApp:
@@ -452,6 +455,13 @@ class AgentClientApp:
             font=("Segoe UI", 9, "bold"), pady=6, command=self.save_and_sync_credentials
         ).pack(fill=tk.X, pady=(8, 2))
 
+        tk.Button(
+            self.submenu_frame,
+            text="🔄 Vérifier les mises à jour (beta / release) & redémarrer",
+            bg="#7c3aed", fg="white", bd=0, activebackground="#6d28d9", activeforeground="white",
+            font=("Segoe UI", 8, "bold"), pady=5, command=self.check_for_updates
+        ).pack(fill=tk.X, pady=(2, 2))
+
     def _toggle_password_visibility(self, entry_widget: tk.Entry):
         current = entry_widget.cget("show")
         entry_widget.config(show="" if current == "*" else "*")
@@ -560,6 +570,94 @@ class AgentClientApp:
             self.append_log("⚙️ Tous les paramètres (Compte, API, Ollama, Mail Terra, Mistral) sont synchronisés avec la VM.\n", "system")
         else:
             self.append_log("💾 Paramètres sauvegardés localement (connecte-toi à la VM pour les synchroniser).\n", "system")
+
+    # --- SYSTÈME DE MISE À JOUR (GIT : beta / release) + REDÉMARRAGE AUTO ---
+    def _git(self, *args) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", APP_DIR, *args], capture_output=True, text=True)
+
+    def check_for_updates(self):
+        if not os.path.isdir(os.path.join(APP_DIR, ".git")):
+            self.append_log("⚠️ Mise à jour impossible : ce dossier n'est pas un clone git.\n", "error")
+            return
+        self.append_log("🔄 Vérification des mises à jour sur GitHub (beta & release)...\n", "system")
+        threading.Thread(target=self._check_updates_worker, daemon=True).start()
+
+    def _check_updates_worker(self):
+        try:
+            self._git("fetch", "origin")
+            options = []
+            for branch, label in (("beta", "🧪 Beta"), ("main", "🚀 Release")):
+                count = self._git("rev-list", "--count", f"HEAD..origin/{branch}").stdout.strip()
+                try:
+                    n = int(count)
+                except ValueError:
+                    n = 0
+                if n > 0:
+                    options.append((f"{label} (+{n} commit{'s' if n > 1 else ''})", branch))
+            self.root.after(0, lambda: self._on_updates_checked(options))
+        except Exception as e:
+            self.root.after(0, lambda err=e: self.append_log(f"⚠️ Erreur vérification mises à jour : {err}\n", "error"))
+
+    def _on_updates_checked(self, options):
+        if not options:
+            self.append_log("✅ L'app est à jour (aucune nouvelle version sur beta ni release).\n", "system")
+            return
+        branch = self._ask_update_choice(options)
+        if not branch:
+            self.append_log("ℹ️ Mise à jour annulée.\n", "system")
+            return
+        self.append_log(f"⬇️ Mise à jour vers '{branch}' en cours...\n", "system")
+        threading.Thread(target=self._apply_update_worker, args=(branch,), daemon=True).start()
+
+    def _ask_update_choice(self, options) -> str | None:
+        result = {"branch": None}
+        top = tk.Toplevel(self.root)
+        top.title("Mise à jour disponible")
+        top.configure(bg="#1e293b")
+        top.resizable(False, False)
+        tk.Label(
+            top, text="🔄 Nouvelle version disponible sur GitHub !\nQuelle version veux-tu installer ?",
+            fg="#38bdf8", bg="#1e293b", font=("Segoe UI", 10, "bold"), justify=tk.CENTER
+        ).pack(padx=16, pady=(12, 8))
+        for label, branch in options:
+            tk.Button(
+                top, text=label, bg="#0284c7", fg="white", bd=0,
+                activebackground="#0369a1", activeforeground="white",
+                font=("Segoe UI", 9, "bold"), padx=10, pady=4,
+                command=lambda b=branch: (result.__setitem__("branch", b), top.destroy())
+            ).pack(padx=16, pady=3, fill=tk.X)
+        tk.Button(
+            top, text="Annuler", bg="#334155", fg="#cbd5e1", bd=0,
+            font=("Segoe UI", 8), padx=10, pady=3, command=top.destroy
+        ).pack(padx=16, pady=(3, 12), fill=tk.X)
+        top.transient(self.root)
+        top.grab_set()
+        self.root.wait_window(top)
+        return result["branch"]
+
+    def _apply_update_worker(self, branch: str):
+        try:
+            if self._git("status", "--porcelain").stdout.strip():
+                self._git("stash", "push", "-m", "auto-update avant mise à jour")
+                self.root.after(0, lambda: self.append_log("💾 Modifications locales mises de côté (git stash).\n", "system"))
+            r = self._git("checkout", branch)
+            if r.returncode != 0:
+                raise RuntimeError((r.stderr or r.stdout).strip())
+            r = self._git("pull", "--ff-only", "origin", branch)
+            if r.returncode != 0:
+                raise RuntimeError((r.stderr or r.stdout).strip())
+            self.root.after(0, lambda: self.append_log(f"✅ Mise à jour '{branch}' appliquée. Redémarrage de l'app...\n", "system"))
+            self.root.after(800, self._restart_app)
+        except Exception as e:
+            self.root.after(0, lambda err=e: self.append_log(f"❌ Échec de la mise à jour : {err}\n", "error"))
+
+    def _restart_app(self):
+        try:
+            if self.sock:
+                self.sock.close()
+        except Exception:
+            pass
+        os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)] + sys.argv[1:])
 
     def inject_credentials_into_input(self):
         """Ajoute rapidement le compte principal enregistré dans le champ de saisie."""
