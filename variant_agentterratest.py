@@ -300,6 +300,7 @@ La capture d'écran que tu reçois fait exactement {VISION_TARGET_WIDTH}x{VISION
 🟪 RÈGLES PARSEC (CONNEXION DISTANTE SUR DEMANDE) :
 - L'utilisateur peut te demander de te connecter à l'un de ses PC via Parsec (l'application est installée sur la VM).
 - Utilise `parsec_connect(target="<nom du PC>")` : Parsec s'ouvre, le PC est recherché, puis double-clique sur le bon ordinateur pour lancer la connexion.
+- JUSTE APRÈS le double-clic de connexion, appelle OBLIGATOIREMENT `parsec_confirm_connection` UNE SEULE FOIS : elle clique dans une zone vide pour capter le focus du PC distant et vérifie que le contrôle a basculé. Sans cette confirmation, tes actions s'exécuteraient sur l'hôte et non dans le PC connecté. N'appelle jamais cet outil en boucle.
 - Les TOUCHES IMMERSIVES sont activées : une fois connecté, toutes tes actions (clics, saisie clavier) pilotent directement le PC distant. Continue la mission normalement dedans.
 - Ne tente JAMAIS de te déconnecter toi-même à la fin d'une action sur le PC distant : l'utilisateur te déconnectera lui-même avec Ctrl+Alt+². Sauf si il te le demande explicitement (`parsec_disconnect`).
 
@@ -593,6 +594,18 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "parsec_confirm_connection",
+            "description": "OBLIGATOIRE après le double-clic de connexion dans Parsec : clique dans une zone vide (centre de l'écran) pour capter le focus du PC distant et vérifie que l'écran distant réagit (comparaison avant/après). Appelle cet outil UNE seule fois après la connexion, jamais en boucle (3 vérifications internes max).",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "parsec_disconnect",
             "description": "Se déconnecte du PC distant Parsec via le raccourci immersif Ctrl+Alt+² et rend le contrôle à la VM locale.",
             "parameters": {
@@ -767,8 +780,42 @@ def _parsec_connect(target: str, app_instance=None) -> str:
     except Exception as e:
         return f"Recherche du PC '{target}' dans Parsec échouée : {e}"
 
-    return (f"Recherche du PC '{target}' lancée dans Parsec. Localise le bon ordinateur dans la liste "
-            "et double-clique dessus pour lancer la connexion, puis attends que le bureau distant s'affiche.")
+    return (f"Recherche du PC '{target}' lancée dans Parsec. Double-clique sur le bon ordinateur dans la liste "
+            "pour lancer la connexion, puis appelle `parsec_confirm_connection` pour valider que le contrôle "
+            "a bien basculé sur le PC distant avant de continuer la mission.")
+
+
+def _parsec_confirm_connection(app_instance=None) -> str:
+    """
+    Confirme que le contrôle a bien basculé sur le PC distant :
+    clic au centre (zone vide) pour capter le focus, puis comparaison des captures
+    d'écran avant/après mouvement de souris. Borné à 3 tentatives max (pas de clic en boucle).
+    """
+    try:
+        sw, sh = get_screen_size()
+        center_x, center_y = sw // 2, sh // 2
+
+        for attempt in range(1, 4):
+            if app_instance and getattr(app_instance, "stop_requested", False):
+                return "Confirmation Parsec interrompue par l'utilisateur."
+
+            before = capture_screen(draw_cursor=False)
+            pyautogui.moveTo(center_x, center_y, duration=0.25)
+            pyautogui.click(center_x, center_y)
+            time.sleep(0.8)
+            pyautogui.moveRel(60, 60, duration=0.25)
+            time.sleep(0.5)
+            after = capture_screen(draw_cursor=False)
+
+            if hashlib.md5(before).hexdigest() != hashlib.md5(after).hexdigest():
+                return ("✅ Connexion Parsec confirmée : le contrôle est bien sur le PC distant. "
+                        "Continue la mission normalement dedans.")
+            time.sleep(1.0)
+
+        return ("⚠️ Impossible de confirmer la bascule vers le PC distant après 3 tentatives (écran identique). "
+                "Vérifie que la connexion Parsec est établie ou utilise `ask_human`.")
+    except Exception as e:
+        return f"Erreur lors de la confirmation Parsec : {e}"
 
 
 def _parsec_disconnect() -> str:
@@ -1101,6 +1148,9 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
 
         elif name == "parsec_disconnect":
             return _parsec_disconnect()
+
+        elif name == "parsec_confirm_connection":
+            return _parsec_confirm_connection(app_instance=app_instance)
 
         elif name == "scroll":
             amount = int(args.get("amount", -500))

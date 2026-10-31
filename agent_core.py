@@ -242,7 +242,7 @@ La capture d'écran reçue fait exactement {VISION_TARGET_WIDTH}x{VISION_TARGET_
 1. CISCO PACKET TRACER : Clique sur la console CLI pour lui donner le focus, puis utilise EXCLUSIVEMENT `send_cisco_cli_block`.
 2. PDF : N'ouvre JAMAIS un PDF dans Docs ou Word. Utilise toujours l'outil `edit_pdf`.
 3. TEXTE & MISE EN PAGE : Utilise `type_text` pour injecter des blocs de texte propres sans fautes.
-4. PARSEC : Si l'utilisateur demande de se connecter à l'un de ses PC, utilise `parsec_connect(target=...)`. Touches immersives actives : une fois connecté, pilote le PC distant normalement. Ne te déconnecte pas seul : l'utilisateur le fera avec Ctrl+Alt+² (sauf demande explicite : `parsec_disconnect`).
+4. PARSEC : Si l'utilisateur demande de se connecter à l'un de ses PC, utilise `parsec_connect(target=...)`. Juste après le double-clic de connexion, appelle OBLIGATOIREMENT `parsec_confirm_connection` UNE SEULE FOIS (clic zone vide + vérification du focus du PC distant). Touches immersives actives : une fois confirmé, pilote le PC distant normalement. Ne te déconnecte pas seul : l'utilisateur le fera avec Ctrl+Alt+² (sauf demande explicite : `parsec_disconnect`).
 """
 
 TOOLS_SCHEMA = [
@@ -451,6 +451,18 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "parsec_confirm_connection",
+            "description": "OBLIGATOIRE après le double-clic de connexion dans Parsec : clique dans une zone vide pour capter le focus du PC distant et vérifie que l'écran distant réagit. Appelle-le UNE seule fois, jamais en boucle.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "parsec_disconnect",
             "description": "Se déconnecte du PC distant Parsec (Ctrl+Alt+²) et rend le contrôle à la VM.",
             "parameters": {
@@ -586,8 +598,37 @@ def _parsec_connect(target: str, app_instance=None) -> str:
     except Exception as e:
         return f"Recherche du PC '{target}' dans Parsec échouée : {e}"
 
-    return (f"Recherche du PC '{target}' lancée dans Parsec. Double-clique sur le bon ordinateur "
-            "pour lancer la connexion puis attends le bureau distant.")
+    return (f"Recherche du PC '{target}' lancée dans Parsec. Double-clique sur le bon ordinateur dans la liste "
+            "pour lancer la connexion, puis appelle `parsec_confirm_connection` pour valider que le contrôle "
+            "a bien basculé sur le PC distant avant de continuer la mission.")
+
+
+def _parsec_confirm_connection(app_instance=None) -> str:
+    try:
+        sw, sh = get_screen_size()
+        center_x, center_y = sw // 2, sh // 2
+
+        for attempt in range(1, 4):
+            if app_instance and getattr(app_instance, "stop_requested", False):
+                return "Confirmation Parsec interrompue par l'utilisateur."
+
+            before = capture_screen(draw_cursor=False)
+            pyautogui.moveTo(center_x, center_y, duration=0.25)
+            pyautogui.click(center_x, center_y)
+            time.sleep(0.8)
+            pyautogui.moveRel(60, 60, duration=0.25)
+            time.sleep(0.5)
+            after = capture_screen(draw_cursor=False)
+
+            if hashlib.md5(before).hexdigest() != hashlib.md5(after).hexdigest():
+                return ("✅ Connexion Parsec confirmée : le contrôle est bien sur le PC distant. "
+                        "Continue la mission normalement dedans.")
+            time.sleep(1.0)
+
+        return ("⚠️ Impossible de confirmer la bascule vers le PC distant après 3 tentatives (écran identique). "
+                "Vérifie que la connexion Parsec est établie ou utilise `ask_human`.")
+    except Exception as e:
+        return f"Erreur lors de la confirmation Parsec : {e}"
 
 
 def _parsec_disconnect() -> str:
@@ -797,6 +838,9 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
 
         elif name == "parsec_disconnect":
             return _parsec_disconnect()
+
+        elif name == "parsec_confirm_connection":
+            return _parsec_confirm_connection(app_instance=app_instance)
 
         elif name == "scroll":
             amt = int(args.get("amount", -500))
