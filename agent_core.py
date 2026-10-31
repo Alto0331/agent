@@ -22,6 +22,11 @@ import pygetwindow as gw
 import pyperclip
 from openai import OpenAI
 
+try:
+    import agent_hooks as hooks
+except Exception:
+    hooks = None
+
 # PyMuPDF (fitz)
 try:
     import fitz
@@ -242,6 +247,7 @@ La capture d'écran reçue fait exactement {VISION_TARGET_WIDTH}x{VISION_TARGET_
 1. CISCO PACKET TRACER : Clique sur la console CLI pour lui donner le focus, puis utilise EXCLUSIVEMENT `send_cisco_cli_block`.
 2. PDF : N'ouvre JAMAIS un PDF dans Docs ou Word. Utilise toujours l'outil `edit_pdf`.
 3. TEXTE & MISE EN PAGE : Utilise `type_text` pour injecter des blocs de texte propres sans fautes.
+5. COMMANDES AVANT CLICS : utilise `run_command` et `file_op` pour tout ce qui est scriptable (fichiers, ping, listage). Pour lire un email, utilise `read_mailbox` directement (jamais via le navigateur).
 4. PARSEC : Si l'utilisateur demande de se connecter à l'un de ses PC, utilise `parsec_connect(target=...)`. Juste après le double-clic de connexion, appelle OBLIGATOIREMENT `parsec_confirm_connection` UNE SEULE FOIS (clic zone vide + vérification du focus du PC distant). Touches immersives actives : une fois confirmé, pilote le PC distant normalement. Ne te déconnecte pas seul : l'utilisateur le fera avec Ctrl+Alt+² (sauf demande explicite : `parsec_disconnect`).
 """
 
@@ -468,6 +474,53 @@ TOOLS_SCHEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": "Exécute une commande shell Windows et retourne la sortie. À privilégier pour toute action scriptable (fichiers, ping, tasklist, ipconfig...).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "timeout": {"type": "integer", "default": 30},
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "file_op",
+            "description": "Opérations fichiers sans souris : list, read, write, mkdir, delete, move, copy.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "read", "write", "mkdir", "delete", "move", "copy"]},
+                    "path": {"type": "string"},
+                    "destination": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["action", "path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_mailbox",
+            "description": "Lit directement la boîte mail de l'agent (IMAP, sans navigateur). Retourne les derniers mails.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "max_mails": {"type": "integer", "default": 10},
+                    "unread_only": {"type": "boolean", "default": false},
+                },
                 "required": [],
             },
         },
@@ -830,6 +883,27 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
                 time.sleep(0.12)
             return f"Raccourci {'+'.join(keys)}."
 
+        elif name == "run_command":
+            if hooks is None:
+                return "Outil commande indisponible."
+            return hooks.run_shell_command(str(args.get("command", "")).strip(), int(args.get("timeout", 30)))
+
+        elif name == "file_op":
+            if hooks is None:
+                return "Outil fichiers indisponible."
+            return hooks.file_operation(
+                str(args.get("action", "")), str(args.get("path", "")),
+                str(args.get("destination", "")), str(args.get("content", "")),
+            )
+
+        elif name == "read_mailbox":
+            if hooks is None:
+                return "Outil boîte mail indisponible."
+            return hooks.read_agent_mailbox(
+                max_mails=min(20, max(1, int(args.get("max_mails", 10)))),
+                unread_only=bool(args.get("unread_only", False)),
+            )
+
         elif name == "parsec_connect":
             target = str(args.get("target", "")).strip()
             if not target:
@@ -930,6 +1004,7 @@ def run_agent(task: str, app_instance=None, max_steps: int = 35):
     ]
 
     history_logs: list[str] = []
+    api_error_streak = 0
     unchanged_screen_count = 0
     last_screen_hash = None
 
@@ -972,8 +1047,13 @@ def run_agent(task: str, app_instance=None, max_steps: int = 35):
                 temperature=0.0,
                 max_tokens=600,
             )
+            api_error_streak = 0
         except Exception as e:
-            log_msg(f"❌ Erreur API Claude : {e}\n", "error")
+            api_error_streak += 1
+            log_msg(f"❌ Erreur API Claude ({api_error_streak}/5) : {e}\n", "error")
+            if api_error_streak >= 5:
+                log_msg("⛔ API indisponible après 5 erreurs. Mission annulée proprement.\n", "error")
+                return
             time.sleep(1.5)
             continue
 
@@ -982,9 +1062,14 @@ def run_agent(task: str, app_instance=None, max_steps: int = 35):
 
         msg = response.choices[0].message if response and getattr(response, "choices", None) else None
         if msg is None:
-            log_msg("⚠️ Réponse API vide (erreur fournisseur). Nouvelle tentative.\n", "error")
+            api_error_streak += 1
+            log_msg(f"⚠️ Réponse API vide ({api_error_streak}/5). Nouvelle tentative.\n", "error")
+            if api_error_streak >= 5:
+                log_msg("⛔ API indisponible après 5 réponses vides. Mission annulée proprement.\n", "error")
+                return
             time.sleep(1.5)
             continue
+        api_error_streak = 0
         tool_calls = getattr(msg, "tool_calls", None)
 
         if not tool_calls:

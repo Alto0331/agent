@@ -32,6 +32,11 @@ import pygetwindow as gw
 import pyperclip
 from openai import OpenAI
 
+try:
+    import agent_hooks as hooks
+except Exception:
+    hooks = None
+
 # Importation de PyMuPDF (fitz) avec installation automatique silencieuse si absent sur la VM
 try:
     import fitz  # PyMuPDF
@@ -285,6 +290,11 @@ La capture d'écran que tu reçois fait exactement {VISION_TARGET_WIDTH}x{VISION
    - Dans Word / Bloc-notes / Mails : utilise des sauts de ligne clairs (`\n\n` entre les paragraphes, titres nets, listes structurées sans symboles Markdown bruts comme `**` ou `###` sauf si demandé).
    - Dans Excel : pour remplir plusieurs cellules d'un coup, prépare les lignes avec des tabulations `\t` entre les colonnes et `\n` entre les lignes, puis utilise `write_clipboard(text=..., paste=True)`.
 4. NAVIGATION WEB : Privilégie toujours le navigateur Brave (`open_app_or_url` avec l'URL ou `brave`) pour éviter les pop-ups.
+
+🟨 RÈGLE D'OR : COMMANDES AVANT CLICS :
+- TOUT ce qui peut être fait via une commande DOIT être fait via `run_command` ou `file_op` : gestion/déplacement/suppression/copie de fichiers, listage de dossiers, renommage en masse, ping, ipconfig, tasklist, installations silencieuses, recherche de fichiers, lecture/écriture de fichiers.
+- N'utilise la souris/l'écran QUE pour ce qui est visuel par nature : ouvrir/fermer une application, naviguer dans une interface graphique, remplir un formulaire web, utiliser un logiciel sans CLI.
+- Pour extraire des informations d'un email (code, lien, pièce jointe, facture), utilise `read_mailbox` directement — JAMAIS via le navigateur (40 étapes inutiles).
 
 🟣 RÈGLES D'ÉDITION DE FICHIERS PDF (PYMUPDF / FITZ) :
 - N'ouvre JAMAIS un fichier PDF dans Google Docs ou Word pour le modifier (cela détruit la mise en page).
@@ -611,6 +621,53 @@ TOOLS_SCHEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": "Exécute une commande shell Windows (cmd) et retourne la sortie. À PRivilÉGIER pour toute action scriptable : gestion de fichiers, renommage en masse, ipconfig, tasklist, ping, installation silencieuse, etc. Beaucoup plus rapide et fiable que les clics.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Commande cmd à exécuter (ex: 'dir C:\\Users', 'move file.txt D:\\dest')."},
+                    "timeout": {"type": "integer", "default": 30, "description": "Délai max en secondes (3 à 120)."},
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "file_op",
+            "description": "Opérations fichiers directes sans souris : list, read, write, mkdir, delete, move, copy. Privilégie cet outil plutôt que le clic dans l'explorateur pour toute manipulation de fichiers.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "read", "write", "mkdir", "delete", "move", "copy"], "description": "Opération à effectuer."},
+                    "path": {"type": "string", "description": "Chemin du fichier ou dossier (ex: 'C:\\Users\\moi\\Downloads')."},
+                    "destination": {"type": "string", "description": "Chemin de destination (move/copy)."},
+                    "content": {"type": "string", "description": "Contenu à écrire (write)."},
+                },
+                "required": ["action", "path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_mailbox",
+            "description": "Lit directement la boîte mail de l'agent (IMAP, sans navigateur ni 40 étapes). Retourne les derniers mails (expéditeur, objet, date, corps). Idéal pour extraire des infos d'un email (code, lien, facture) demandé par l'utilisateur.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "max_mails": {"type": "integer", "default": 10, "description": "Nombre de mails à lire (max 20)."},
+                    "unread_only": {"type": "boolean", "default": false, "description": "true pour ne lire que les non-lus."},
+                },
                 "required": [],
             },
         },
@@ -1140,6 +1197,33 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
                 time.sleep(0.12)
             return f"Raccourci {'+'.join(keys)} exécuté."
 
+        elif name == "run_command":
+            if hooks is None:
+                return "Outil commande indisponible sur ce moteur."
+            command = str(args.get("command", "")).strip()
+            timeout = int(args.get("timeout", 30))
+            if not command:
+                return "Paramètre 'command' manquant."
+            return hooks.run_shell_command(command, timeout)
+
+        elif name == "file_op":
+            if hooks is None:
+                return "Outil fichiers indisponible sur ce moteur."
+            return hooks.file_operation(
+                str(args.get("action", "")),
+                str(args.get("path", "")),
+                str(args.get("destination", "")),
+                str(args.get("content", "")),
+            )
+
+        elif name == "read_mailbox":
+            if hooks is None:
+                return "Outil boîte mail indisponible sur ce moteur."
+            return hooks.read_agent_mailbox(
+                max_mails=min(20, max(1, int(args.get("max_mails", 10)))),
+                unread_only=bool(args.get("unread_only", False)),
+            )
+
         elif name == "parsec_connect":
             target = str(args.get("target", "")).strip()
             if not target:
@@ -1307,6 +1391,7 @@ def run_agent(task: str, app_instance=None, max_steps: int = 45):
 
     # Historique léger des étapes passées (texte uniquement pour économiser les tokens d'entrée)
     history_logs: list[str] = []
+    api_error_streak = 0
     # Conservation des 2 dernières captures maximum [(step_num, b64_img, action_summary)]
     recent_frames: list[dict] = []
 
@@ -1341,7 +1426,7 @@ def run_agent(task: str, app_instance=None, max_steps: int = 45):
         messages = list(static_prefix)
 
         if history_logs:
-            compact_history = "Historique des actions déjà effectuées :\n" + "\n".join(history_logs[-12:])
+            compact_history = "Historique des actions déjà effectuées :\n" + "\n".join(history_logs[-15:])
             messages.append({"role": "assistant", "content": compact_history})
 
         # Ajout de la capture précédente (si disponible) pour donner le contexte visuel N-1
@@ -1374,8 +1459,13 @@ def run_agent(task: str, app_instance=None, max_steps: int = 45):
         # 3. Appel à GPT-6.1 Terra (Flex 3s -> Standard)
         try:
             response = call_terra_model(client, messages)
+            api_error_streak = 0
         except Exception as api_err:
-            log_msg(f"❌ Erreur API OpenRouter : {api_err}\n", "error")
+            api_error_streak += 1
+            log_msg(f"❌ Erreur API OpenRouter ({api_error_streak}/5) : {api_err}\n", "error")
+            if api_error_streak >= 5:
+                log_msg("⛔ API indisponible après 5 erreurs consécutives. Mission annulée proprement.\n", "error")
+                return
             time.sleep(1.5)
             continue
 
@@ -1385,9 +1475,14 @@ def run_agent(task: str, app_instance=None, max_steps: int = 45):
 
         msg = response.choices[0].message if response and getattr(response, "choices", None) else None
         if msg is None:
-            log_msg("⚠️ Réponse API vide (erreur fournisseur). Nouvelle tentative.\n", "error")
+            api_error_streak += 1
+            log_msg(f"⚠️ Réponse API vide ({api_error_streak}/5). Nouvelle tentative.\n", "error")
+            if api_error_streak >= 5:
+                log_msg("⛔ API indisponible après 5 réponses vides. Mission annulée proprement.\n", "error")
+                return
             time.sleep(1.5)
             continue
+        api_error_streak = 0
         tool_calls = getattr(msg, "tool_calls", None)
 
         # Si le modèle répond sans appeler d'outil

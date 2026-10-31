@@ -1,5 +1,8 @@
 ﻿api_key.txt
 client_config.json
 credentials.json
+trusted_senders.enc
+mail_queue.json
+missions.log
 __pycache__/
 *.pyc
