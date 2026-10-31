@@ -297,6 +297,12 @@ La capture d'écran que tu reçois fait exactement {VISION_TARGET_WIDTH}x{VISION
 2. `send_cisco_cli_block` tape les commandes manuellement en Unicode pur sans aucun bug AZERTY/QWERTY et gère automatiquement `enable` et `no ip domain-lookup`.
 3. N'utilise pas `Ctrl+V` dans la CLI Cisco IOS (cela écrit `^V`). Passe toujours par `send_cisco_cli_block`.
 
+🟪 RÈGLES PARSEC (CONNEXION DISTANTE SUR DEMANDE) :
+- L'utilisateur peut te demander de te connecter à l'un de ses PC via Parsec (l'application est installée sur la VM).
+- Utilise `parsec_connect(target="<nom du PC>")` : Parsec s'ouvre, le PC est recherché, puis double-clique sur le bon ordinateur pour lancer la connexion.
+- Les TOUCHES IMMERSIVES sont activées : une fois connecté, toutes tes actions (clics, saisie clavier) pilotent directement le PC distant. Continue la mission normalement dedans.
+- Ne tente JAMAIS de te déconnecter toi-même à la fin d'une action sur le PC distant : l'utilisateur te déconnectera lui-même avec Ctrl+Alt+². Sauf si il te le demande explicitement (`parsec_disconnect`).
+
 🟡 GESTION DES BLOCAGES ET FIN DE MISSION IMMÉDIATE :
 - Si une fenêtre de connexion, un CAPTCHA, un mot de passe inconnu ou une ambiguïté critique bloque la mission, appelle `ask_human`.
 - INTERDICTION DE VÉRIFIER EN BOUCLE : Dès que tu as effectué les actions demandées par l'utilisateur (ex: épingler une application, valider un formulaire, saisir un texte, modifier un PDF), appelle IMMÉDIATEMENT `finish_task`.
@@ -570,6 +576,35 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "parsec_connect",
+            "description": "Ouvre Parsec, cherche le PC demandé et lance la connexion distante. Les touches immersives sont actives : une fois connecté, toutes les actions (clics, frappe) pilotent le PC distant. L'utilisateur te déconnectera avec Ctrl+Alt+² quand il voudra.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Nom exact ou approximatif du PC auquel se connecter (ex: 'PC-Bureau', 'Laptop-Alto').",
+                    },
+                },
+                "required": ["target"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "parsec_disconnect",
+            "description": "Se déconnecte du PC distant Parsec via le raccourci immersif Ctrl+Alt+² et rend le contrôle à la VM locale.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "wait",
             "description": "Attend pendant un chargement de page ou d'application (3 secondes maximum).",
             "parameters": {
@@ -636,6 +671,12 @@ def prepare_task_data(task: str) -> dict:
             "MODE EXCEL DÉTECTÉ : Clique sur la cellule de départ (ex: A1) puis utilise `write_clipboard` avec des tabulations `\t` "
             "entre les colonnes et `\n` entre les lignes pour remplir tout le tableau d'un seul coup."
         )
+    if any(k in t_low for k in ["parsec", "pc distant", "se connecter au pc", "connecte-toi au pc", "connecte toi au pc", "remote pc"]):
+        hints.append(
+            "MODE PARSEC DÉTECTÉ : Utilise `parsec_connect` avec le nom exact du PC donné par l'utilisateur. "
+            "Les touches immersives sont actives : une fois connecté, pilote le PC distant normalement. "
+            "Ne te déconnecte pas tout seul : l'utilisateur le fera avec Ctrl+Alt+²."
+        )
     if any(k in t_low for k in ["word", "document", "lettre", "rapport", "rédige", "redige", "texte", "paragraphe", "bloc-notes", "notepad"]):
         hints.append(
             "MODE RÉDACTION DÉTECTÉ : Soigne l'orthographe française, les accents et la ponctuation. "
@@ -662,6 +703,82 @@ def _find_brave_exe() -> str | None:
         if os.path.exists(p):
             return p
     return None
+
+
+def _find_parsec_exe() -> str | None:
+    parsec_paths = [
+        os.path.expandvars(r"%ProgramFiles%\Parsec\parsec.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\Parsec\parsec.exe"),
+        os.path.expandvars(r"%LocalAppData%\Parsec\parsec.exe"),
+        os.path.expandvars(r"%LocalAppData%\Programs\Parsec\parsec.exe"),
+    ]
+    for p in parsec_paths:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _parsec_connect(target: str, app_instance=None) -> str:
+    """
+    Ouvre Parsec, sélectionne le PC demandé et lance la connexion distante.
+    Le mode touches immersives est actif : une fois connecté, l'agent pilote le PC distant
+    et l'utilisateur le déconnecte avec Ctrl+Alt+².
+    """
+    parsec_exe = _find_parsec_exe()
+    if not parsec_exe:
+        return ("Parsec n'est pas installé sur la VM (parsec.exe introuvable). "
+                "Demande à l'utilisateur de l'installer via `ask_human`.")
+
+    sub = target.lower().strip()
+    wins = [w for w in gw.getAllWindows() if w.title and "parsec" in w.title.lower()]
+    if wins:
+        w = wins[0]
+        try:
+            if w.isMinimized:
+                w.restore()
+            w.activate()
+            time.sleep(0.3)
+        except Exception:
+            pass
+    else:
+        subprocess.Popen([parsec_exe])
+        time.sleep(2.5)
+        wins = [w for w in gw.getAllWindows() if w.title and "parsec" in w.title.lower()]
+        if wins:
+            try:
+                wins[0].activate()
+            except Exception:
+                pass
+
+    computers = [w for w in gw.getAllWindows() if w.title and "parsec" in w.title.lower()]
+    if not computers:
+        return "Impossible d'ouvrir la fenêtre Parsec. Vérifie l'installation."
+
+    try:
+        time.sleep(1.0)
+        pyautogui.hotkey("ctrl", "f")
+        time.sleep(0.5)
+        type_unicode_string(target, app_instance=app_instance)
+        time.sleep(0.4)
+        pyautogui.press("enter")
+        time.sleep(1.0)
+        pyautogui.press("esc")
+        time.sleep(0.5)
+    except Exception as e:
+        return f"Recherche du PC '{target}' dans Parsec échouée : {e}"
+
+    return (f"Recherche du PC '{target}' lancée dans Parsec. Localise le bon ordinateur dans la liste "
+            "et double-clique dessus pour lancer la connexion, puis attends que le bureau distant s'affiche.")
+
+
+def _parsec_disconnect() -> str:
+    """Se déconnecte du PC distant via le raccourci immersif Ctrl+Alt+²."""
+    try:
+        pyautogui.hotkey("ctrl", "alt", "²")
+        time.sleep(0.6)
+        return "Déconnexion Parsec envoyée (Ctrl+Alt+²). Le contrôle revient à la VM."
+    except Exception as e:
+        return f"Échec de la déconnexion Parsec : {e}"
 
 
 def _resolve_pdf_path(raw_path: str) -> str:
@@ -975,6 +1092,15 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
                 pyautogui.hotkey(*keys)
                 time.sleep(0.12)
             return f"Raccourci {'+'.join(keys)} exécuté."
+
+        elif name == "parsec_connect":
+            target = str(args.get("target", "")).strip()
+            if not target:
+                return "Paramètre 'target' manquant : nom du PC distant requis."
+            return _parsec_connect(target, app_instance=app_instance)
+
+        elif name == "parsec_disconnect":
+            return _parsec_disconnect()
 
         elif name == "scroll":
             amount = int(args.get("amount", -500))

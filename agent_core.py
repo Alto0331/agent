@@ -242,6 +242,7 @@ La capture d'écran reçue fait exactement {VISION_TARGET_WIDTH}x{VISION_TARGET_
 1. CISCO PACKET TRACER : Clique sur la console CLI pour lui donner le focus, puis utilise EXCLUSIVEMENT `send_cisco_cli_block`.
 2. PDF : N'ouvre JAMAIS un PDF dans Docs ou Word. Utilise toujours l'outil `edit_pdf`.
 3. TEXTE & MISE EN PAGE : Utilise `type_text` pour injecter des blocs de texte propres sans fautes.
+4. PARSEC : Si l'utilisateur demande de se connecter à l'un de ses PC, utilise `parsec_connect(target=...)`. Touches immersives actives : une fois connecté, pilote le PC distant normalement. Ne te déconnecte pas seul : l'utilisateur le fera avec Ctrl+Alt+² (sauf demande explicite : `parsec_disconnect`).
 """
 
 TOOLS_SCHEMA = [
@@ -436,6 +437,32 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "parsec_connect",
+            "description": "Ouvre Parsec, cherche le PC demandé et lance la connexion distante. Touches immersives actives : une fois connecté, toutes les actions pilotent le PC distant. L'utilisateur se déconnecte avec Ctrl+Alt+².",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "description": "Nom du PC distant."},
+                },
+                "required": ["target"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "parsec_disconnect",
+            "description": "Se déconnecte du PC distant Parsec (Ctrl+Alt+²) et rend le contrôle à la VM.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "wait",
             "description": "Attente (max 3 secondes).",
             "parameters": {
@@ -503,6 +530,73 @@ def _find_brave_exe() -> str | None:
         if os.path.exists(p):
             return p
     return None
+
+
+def _find_parsec_exe() -> str | None:
+    parsec_paths = [
+        os.path.expandvars(r"%ProgramFiles%\Parsec\parsec.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\Parsec\parsec.exe"),
+        os.path.expandvars(r"%LocalAppData%\Parsec\parsec.exe"),
+        os.path.expandvars(r"%LocalAppData%\Programs\Parsec\parsec.exe"),
+    ]
+    for p in parsec_paths:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _parsec_connect(target: str, app_instance=None) -> str:
+    parsec_exe = _find_parsec_exe()
+    if not parsec_exe:
+        return "Parsec n'est pas installé sur la VM (parsec.exe introuvable). Demande à l'utilisateur via `ask_human`."
+
+    wins = [w for w in gw.getAllWindows() if w.title and "parsec" in w.title.lower()]
+    if wins:
+        w = wins[0]
+        try:
+            if w.isMinimized:
+                w.restore()
+            w.activate()
+            time.sleep(0.3)
+        except Exception:
+            pass
+    else:
+        subprocess.Popen([parsec_exe])
+        time.sleep(2.5)
+        wins = [w for w in gw.getAllWindows() if w.title and "parsec" in w.title.lower()]
+        if wins:
+            try:
+                wins[0].activate()
+            except Exception:
+                pass
+
+    if not [w for w in gw.getAllWindows() if w.title and "parsec" in w.title.lower()]:
+        return "Impossible d'ouvrir la fenêtre Parsec."
+
+    try:
+        time.sleep(1.0)
+        pyautogui.hotkey("ctrl", "f")
+        time.sleep(0.5)
+        type_unicode_string(target, app_instance=app_instance)
+        time.sleep(0.4)
+        pyautogui.press("enter")
+        time.sleep(1.0)
+        pyautogui.press("esc")
+        time.sleep(0.5)
+    except Exception as e:
+        return f"Recherche du PC '{target}' dans Parsec échouée : {e}"
+
+    return (f"Recherche du PC '{target}' lancée dans Parsec. Double-clique sur le bon ordinateur "
+            "pour lancer la connexion puis attends le bureau distant.")
+
+
+def _parsec_disconnect() -> str:
+    try:
+        pyautogui.hotkey("ctrl", "alt", "²")
+        time.sleep(0.6)
+        return "Déconnexion Parsec envoyée (Ctrl+Alt+²)."
+    except Exception as e:
+        return f"Échec de la déconnexion Parsec : {e}"
 
 
 def _resolve_pdf_path(raw_path: str) -> str:
@@ -694,6 +788,15 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
                 pyautogui.hotkey(*keys)
                 time.sleep(0.12)
             return f"Raccourci {'+'.join(keys)}."
+
+        elif name == "parsec_connect":
+            target = str(args.get("target", "")).strip()
+            if not target:
+                return "Paramètre 'target' manquant."
+            return _parsec_connect(target, app_instance=app_instance)
+
+        elif name == "parsec_disconnect":
+            return _parsec_disconnect()
 
         elif name == "scroll":
             amt = int(args.get("amount", -500))
