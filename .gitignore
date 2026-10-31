@@ -6,3 +6,4 @@ mail_queue.json
 missions.log
 __pycache__/
 *.pyc
+attachments/

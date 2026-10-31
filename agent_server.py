@@ -22,7 +22,8 @@ DEPENDENCIES = {
     'pyautogui': 'PyAutoGUI',
     'pygetwindow': 'PyGetWindow',
     'pyperclip': 'pyperclip',
-    'fitz': 'pymupdf'
+    'fitz': 'pymupdf',
+    'docx': 'python-docx'
 }
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -623,6 +624,68 @@ def start_agent_task(task: str, app_instance: RemoteAppInstance, on_complete=Non
 MAIL_QUEUE_FILE = os.path.join(BASE_DIR, "mail_queue.json")
 
 
+ATTACHMENTS_DIR = os.path.join(BASE_DIR, "attachments")
+BLOCKED_ATTACHMENT_EXTS = {".exe", ".bat", ".cmd", ".scr", ".msi", ".com", ".ps1", ".vbs", ".js", ".jar", ".lnk", ".dll"}
+
+
+def _sanitize_attachment_name(filename: str, sender_addr: str) -> str:
+    """Nettoie un nom de pièce jointe : retire tout chemin, caractères dangereux, et préfixe l'expéditeur."""
+    name = os.path.basename(filename.replace("\\", "/")).strip()
+    name = "".join(c for c in name if c.isalnum() or c in "._- ")
+    name = name.replace("..", "_")
+    if not name:
+        name = "piece_jointe"
+    prefix = "".join(c for c in sender_addr.split("@")[0] if c.isalnum())[:16] or "sender"
+    return f"{prefix}_{name}"[:120]
+
+
+def _save_attachments(msg, sender_addr: str) -> list[dict]:
+    """Sauvegarde les pièces jointes d'un mail dans attachments/ (sans jamais les exécuter).
+    Retourne [{'filename':..., 'path':..., 'blocked': bool}] — les extensions dangereuses ne sont pas écrites."""
+    saved = []
+    try:
+        os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
+        for part in msg.walk():
+            if part.get_content_maintype() == "multipart":
+                continue
+            filename = part.get_filename()
+            if not filename:
+                continue
+            clean_name = _sanitize_attachment_name(watcher_decode(filename), sender_addr)
+            ext = os.path.splitext(clean_name)[1].lower()
+            if ext in BLOCKED_ATTACHMENT_EXTS:
+                saved.append({"filename": clean_name, "path": "", "blocked": True})
+                continue
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            target = os.path.join(ATTACHMENTS_DIR, clean_name)
+            counter = 1
+            while os.path.exists(target):
+                base, dot_ext = os.path.splitext(os.path.join(ATTACHMENTS_DIR, clean_name))
+                target = f"{base}_{counter}{dot_ext}"
+                counter += 1
+            with open(target, "wb") as f:
+                f.write(payload)
+            saved.append({"filename": clean_name, "path": target, "blocked": False})
+    except Exception as e:
+        print(f"[MailWatcher] Pièces jointes : {e}")
+    return saved
+
+
+def watcher_decode(raw_val) -> str:
+    if not raw_val:
+        return ""
+    parts = decode_header(raw_val)
+    decoded = []
+    for content, enc in parts:
+        if isinstance(content, bytes):
+            decoded.append(content.decode(enc or "utf-8", errors="replace"))
+        else:
+            decoded.append(str(content))
+    return "".join(decoded).strip()
+
+
 def fetch_mailbox(max_mails: int = 10, unread_only: bool = False, folder: str = "INBOX") -> list[dict]:
     """
     Lit la boîte mail de Terra via IMAP sans passer par le navigateur.
@@ -656,7 +719,8 @@ def fetch_mailbox(max_mails: int = 10, unread_only: bool = False, folder: str = 
             subject = watcher._decode_str(msg.get("Subject", ""))
             date = watcher._decode_str(msg.get("Date", ""))
             body = watcher._extract_text_body(msg)
-            results.append({"from": sender_addr, "subject": subject, "date": date, "body": body[:4000]})
+            attachments = _save_attachments(msg, sender_addr)
+            results.append({"from": sender_addr, "subject": subject, "date": date, "body": body[:4000], "attachments": attachments})
         return results
     finally:
         try:

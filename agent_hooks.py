@@ -115,8 +115,34 @@ def file_operation(action: str, path: str, destination: str = "", content: str =
     return f"Action inconnue : {a} (attendu : list, read, write, mkdir, delete, move, copy)"
 
 
+def extract_attachment_text(path: str) -> str:
+    """Extrait le texte d'une pièce jointe (PDF via PyMuPDF, docx via python-docx, txt/csv direct)."""
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        if ext == ".pdf":
+            import fitz
+            with fitz.open(path) as doc:
+                return "\n".join(page.get_text() for page in doc)[:8000]
+        if ext in [".docx", ".doc"]:
+            try:
+                from docx import Document
+                doc = Document(path)
+                return "\n".join(p.text for p in doc.paragraphs)[:8000]
+            except ImportError:
+                return "(docx : installer python-docx sur la VM pour lire le contenu, ou ouvrir le fichier dans Word)"
+        if ext in [".txt", ".csv", ".log", ".json", ".md", ".py", ".html", ".xml"]:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                return f.read()[:8000]
+        if ext in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"]:
+            return "(image — ouvre-la avec open_app_or_url pour la consulter visuellement)"
+        return f"(type {ext} non lisible en texte — ouvre le fichier avec open_app_or_url)"
+    except Exception as e:
+        return f"(erreur de lecture : {e})"
+
+
 def read_agent_mailbox(max_mails: int = 10, unread_only: bool = False) -> str:
-    """Lit la boîte mail de l'agent via le hook serveur fetch_mailbox (IMAP, sans navigateur)."""
+    """Lit la boîte mail de l'agent via le hook serveur fetch_mailbox (IMAP, sans navigateur).
+    Les pièces jointes sont téléchargées dans attachments/ ; leur contenu texte est extrait (PDF/docx/txt/csv)."""
     if fetch_mailbox is None:
         return "Lecture de boîte mail indisponible sur ce serveur."
     try:
@@ -125,9 +151,18 @@ def read_agent_mailbox(max_mails: int = 10, unread_only: bool = False) -> str:
             return "Aucun mail trouvé."
         blocks = []
         for m in mails:
-            blocks.append(
-                f"De : {m['from']}\nDate : {m['date']}\nObjet : {m['subject']}\n---\n{m['body'][:1500]}"
-            )
+            block = f"De : {m['from']}\nDate : {m['date']}\nObjet : {m['subject']}\n---\n{m['body'][:1500]}"
+            atts = m.get("attachments") or []
+            if atts:
+                lines = []
+                for a in atts:
+                    if a.get("blocked"):
+                        lines.append(f"- {a['filename']} [BLOQUÉ : exécutable non sauvegardé]")
+                    elif a.get("path"):
+                        extracted = extract_attachment_text(a["path"])
+                        lines.append(f"- {a['filename']} sauvegardé : {a['path']}\n  Contenu extrait :\n{extracted}")
+                block += "\n\nPIÈCES JOINTES :\n" + "\n".join(lines)
+            blocks.append(block)
         return "\n\n==========\n\n".join(blocks)
     except Exception as e:
         return f"Erreur de lecture de la boîte mail : {e}"

@@ -247,7 +247,7 @@ La capture d'écran reçue fait exactement {VISION_TARGET_WIDTH}x{VISION_TARGET_
 1. CISCO PACKET TRACER : Clique sur la console CLI pour lui donner le focus, puis utilise EXCLUSIVEMENT `send_cisco_cli_block`.
 2. PDF : N'ouvre JAMAIS un PDF dans Docs ou Word. Utilise toujours l'outil `edit_pdf`.
 3. TEXTE & MISE EN PAGE : Utilise `type_text` pour injecter des blocs de texte propres sans fautes.
-5. COMMANDES AVANT CLICS : utilise `run_command` et `file_op` pour tout ce qui est scriptable (fichiers, ping, listage). Pour lire un email, utilise `read_mailbox` directement (jamais via le navigateur).
+5. COMMANDES AVANT CLICS : utilise `run_command` et `file_op` pour tout ce qui est scriptable (fichiers, ping, listage). Pour lire un email, utilise `read_mailbox` directement (jamais via le navigateur). Les pièces jointes sont téléchargées dans attachments/ avec leur contenu extrait ; ouvre les documents simples si demandé mais N'EXÉCUTE JAMAIS un binaire reçu par mail.
 4. PARSEC : Si l'utilisateur demande de se connecter à l'un de ses PC, utilise `parsec_connect(target=...)`. Juste après le double-clic de connexion, appelle OBLIGATOIREMENT `parsec_confirm_connection` UNE SEULE FOIS (clic zone vide + vérification du focus du PC distant). Touches immersives actives : une fois confirmé, pilote le PC distant normalement. Ne te déconnecte pas seul : l'utilisateur le fera avec Ctrl+Alt+² (sauf demande explicite : `parsec_disconnect`).
 """
 

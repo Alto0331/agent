@@ -295,6 +295,7 @@ La capture d'écran que tu reçois fait exactement {VISION_TARGET_WIDTH}x{VISION
 - TOUT ce qui peut être fait via une commande DOIT être fait via `run_command` ou `file_op` : gestion/déplacement/suppression/copie de fichiers, listage de dossiers, renommage en masse, ping, ipconfig, tasklist, installations silencieuses, recherche de fichiers, lecture/écriture de fichiers.
 - N'utilise la souris/l'écran QUE pour ce qui est visuel par nature : ouvrir/fermer une application, naviguer dans une interface graphique, remplir un formulaire web, utiliser un logiciel sans CLI.
 - Pour extraire des informations d'un email (code, lien, pièce jointe, facture), utilise `read_mailbox` directement — JAMAIS via le navigateur (40 étapes inutiles).
+- PIÈCES JOINTES : `read_mailbox` télécharge automatiquement les pièces jointes dans attachments/ et extrait leur contenu (PDF, Word, txt, csv). Tu peux OUVRIR les documents simples (pdf, docx, images) avec `open_app_or_url` si demandé. INTERDICTION ABSOLUE d'exécuter un binaire ou script reçu par mail (exe, bat, ps1, jar...) — ils sont bloqués au téléchargement. Si une pièce jointe marquée [BLOQUÉ] semble nécessaire à la mission, demande confirmation à l'utilisateur via `ask_human`.
 
 🟣 RÈGLES D'ÉDITION DE FICHIERS PDF (PYMUPDF / FITZ) :
 - N'ouvre JAMAIS un fichier PDF dans Google Docs ou Word pour le modifier (cela détruit la mise en page).
