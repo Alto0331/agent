@@ -519,7 +519,7 @@ TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "max_mails": {"type": "integer", "default": 10},
-                    "unread_only": {"type": "boolean", "default": false},
+                    "unread_only": {"type": "boolean", "default": False},
                 },
                 "required": [],
             },

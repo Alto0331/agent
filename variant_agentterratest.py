@@ -667,7 +667,7 @@ TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "max_mails": {"type": "integer", "default": 10, "description": "Nombre de mails à lire (max 20)."},
-                    "unread_only": {"type": "boolean", "default": false, "description": "true pour ne lire que les non-lus."},
+                    "unread_only": {"type": "boolean", "default": False, "description": "true pour ne lire que les non-lus."},
                 },
                 "required": [],
             },
