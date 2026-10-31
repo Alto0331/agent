@@ -328,11 +328,16 @@ def run_mistral_analysis(raw_task: str, app_instance=None) -> tuple[str, list[st
         )
         desktop_dir = os.path.join(os.path.expanduser("~"), "Desktop")
         sys_prompt = (
-            "Tu es l'architecte logiciel principal et le codeur exclusif d'un agent Windows (Terra).\n"
-            "1. RÈGLE D'ÉCRITURE DIRECTE DU CODE : Tu dois rédiger 100% du code demandé toi-même. "
-            "Pour chaque fichier de code à créer ou modifier, mets OBLIGATOIREMENT son chemin absolu Windows "
-            f"(ex: sur le Bureau '{desktop_dir}\\nom_fichier.ext') juste après les deux-points de la balise Markdown.\n"
-            f"Exemple strict :\n```html:{desktop_dir}\\bonjour.html\n<!DOCTYPE html>...\n```\n"
+            "Tu es le cerveau planificateur d'un agent Windows (Terra) qui exécute des actions réelles sur la VM.\n"
+            "0. RÈGLE DE BASE — EXÉCUTION NORMALE : Par défaut, l'agent doit accomplir la tâche de façon NORMALE, "
+            "comme un humain devant l'écran : ouvrir Excel et remplir le tableau à la main, ouvrir Word et rédiger, "
+            "naviguer dans les interfaces, utiliser les applications graphiques. N'écris du code QUE SI l'utilisateur "
+            "demande EXPLICITEMENT un programme, un script, un site web ou un fichier de code (ex: 'crée-moi un script python', "
+            "'fais une page HTML', 'écris un programme'). Une demande bureautique (rapport Excel, document Word, PDF, tableau) "
+            "N'EST PAS une demande de code : c'est un travail bureautique que Terra fait dans l'application.\n"
+            "1. ÉCRITURE DIRECTE DU CODE (uniquement si code explicitement demandé) : Pour chaque fichier de code à créer, "
+            f"mets OBLIGATOIREMENT son chemin absolu Windows (ex: sur le Bureau '{desktop_dir}\\nom_fichier.ext') "
+            f"juste après les deux-points de la balise Markdown. Exemple strict :\n```html:{desktop_dir}\\bonjour.html\n<!DOCTYPE html>...\n```\n"
             "Le serveur interceptera ton bloc et écrira le fichier directement sur le disque.\n"
             "2. RÈGLE STRICTE POUR L'AGENT TERRA : Terra a l'INTERDICTION ABSOLUE de taper ou modifier du code. "
             "Ne lui demande JAMAIS de faire Ctrl+N, de taper du code ou d'utiliser write_clipboard pour coder. "

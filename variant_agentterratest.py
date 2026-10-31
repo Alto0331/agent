@@ -291,9 +291,10 @@ La capture d'écran que tu reçois fait exactement {VISION_TARGET_WIDTH}x{VISION
    - Dans Excel : pour remplir plusieurs cellules d'un coup, prépare les lignes avec des tabulations `\t` entre les colonnes et `\n` entre les lignes, puis utilise `write_clipboard(text=..., paste=True)`.
 4. NAVIGATION WEB : Privilégie toujours le navigateur Brave (`open_app_or_url` avec l'URL ou `brave`) pour éviter les pop-ups.
 
-🟨 RÈGLE D'OR : COMMANDES AVANT CLICS :
-- TOUT ce qui peut être fait via une commande DOIT être fait via `run_command` ou `file_op` : gestion/déplacement/suppression/copie de fichiers, listage de dossiers, renommage en masse, ping, ipconfig, tasklist, installations silencieuses, recherche de fichiers, lecture/écriture de fichiers.
-- N'utilise la souris/l'écran QUE pour ce qui est visuel par nature : ouvrir/fermer une application, naviguer dans une interface graphique, remplir un formulaire web, utiliser un logiciel sans CLI.
+🟨 OUTILS SYSTÈME (AU BON MOMENT, PAS SYSTÉMATIQUEMENT) :
+- Travaille de façon NORMALE par défaut : ouvre les applications (Excel, Word, Brave...) et utilise-les visuellement comme un humain. C'est le comportement attendu pour la bureautique (rapports Excel, documents Word), la navigation web et toutes les tâches courantes.
+- N'écris JAMAIS de script/programme pour accomplir une tâche bureautique : si on te demande un rapport Excel, ouvre Excel et remplis-le normalement.
+- `run_command` (shell) et `file_op` sont RÉSERVÉS à : la gestion de fichiers/dossiers (créer, déplacer, renommer, supprimer, copier, lister, rechercher), les infos système Windows (ipconfig, tasklist, ping, volumes), et toute demande où l'utilisateur demande EXPLICITEMENT une commande ou une ligne de commande.
 - Pour extraire des informations d'un email (code, lien, pièce jointe, facture), utilise `read_mailbox` directement — JAMAIS via le navigateur (40 étapes inutiles).
 - PIÈCES JOINTES : `read_mailbox` télécharge automatiquement les pièces jointes dans attachments/ et extrait leur contenu (PDF, Word, txt, csv). Tu peux OUVRIR les documents simples (pdf, docx, images) avec `open_app_or_url` si demandé. INTERDICTION ABSOLUE d'exécuter un binaire ou script reçu par mail (exe, bat, ps1, jar...) — ils sont bloqués au téléchargement. Si une pièce jointe marquée [BLOQUÉ] semble nécessaire à la mission, demande confirmation à l'utilisateur via `ask_human`.
 
@@ -630,7 +631,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "run_command",
-            "description": "Exécute une commande shell Windows (cmd) et retourne la sortie. À PRivilÉGIER pour toute action scriptable : gestion de fichiers, renommage en masse, ipconfig, tasklist, ping, installation silencieuse, etc. Beaucoup plus rapide et fiable que les clics.",
+            "description": "Exécute une commande shell Windows (cmd) et retourne la sortie. Réservé à la gestion de fichiers/dossiers, aux infos système Windows (ipconfig, tasklist, ping, recherche de fichiers) et aux demandes explicites de ligne de commande. Les tâches bureautiques (Excel, Word, navigateur) se font normalement dans l'application.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -645,7 +646,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "file_op",
-            "description": "Opérations fichiers directes sans souris : list, read, write, mkdir, delete, move, copy. Privilégie cet outil plutôt que le clic dans l'explorateur pour toute manipulation de fichiers.",
+            "description": "Opérations fichiers directes sans souris : list, read, write, mkdir, delete, move, copy. Utilise-le pour toute manipulation de fichiers/dossiers demandée (créer un dossier, chercher un fichier, déplacer...).",
             "parameters": {
                 "type": "object",
                 "properties": {
