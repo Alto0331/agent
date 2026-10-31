@@ -1138,7 +1138,7 @@ def run_mistral_next_step(raw_task: str, historique: list[str], app_instance=Non
 # ==============================================================================
 # ORCHESTRATION V2 : MISTRAL CERVEAU (outillé) / TERRA SERVITEUR (visuel)
 # ==============================================================================
-BRAIN_MAX_STEPS = 60
+BRAIN_MAX_STEPS = 250
 
 BRAIN_TOOLS_SCHEMA = [
     {
@@ -1233,11 +1233,12 @@ BRAIN_TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "delegate_terra",
-            "description": "Délègue une mission visuelle à Terra (le serviteur GPT qui contrôle l'écran de la VM) : décrire précisément un site ouvert dans Brave, vérifier un rendu (superpositions, bugs visuels), naviguer, remplir un formulaire, se connecter, faire une capture. Terra ne réfléchit pas : il exécute et décrit FACTUELLEMENT ce qu'il voit. Retourne son rapport complet.",
+            "description": "Délègue une mission visuelle à Terra (le serviteur GPT qui contrôle l'écran de la VM) : décrire précisément un site ouvert dans Brave, vérifier un rendu (superpositions, bugs visuels, images manquantes/cassées, cohérence image-texte), tester le format téléphone (F12 puis mode responsive), naviguer, remplir un formulaire, se connecter. Terra ne réfléchit pas : il exécute et décrit FACTUELLEMENT ce qu'il voit. Retourne son rapport complet.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "mission": {"type": "string", "description": "Mission claire et autonome pour Terra (ex: 'Ouvre https://... dans Brave et décris précisément la page d\'accueil : structure, style, problèmes visuels éventuels. Termine par RÉSULTAT: ...')."},
+                    "mission": {"type": "string", "description": "Mission claire, AUTONOME et COMPLÈTE pour Terra. Précise TOUJOURS la checklist factuelle attendue (ex: 'Ouvre file:///C:/.../index.html dans Brave et vérifie : 1) chaque image s'affiche-t-elle (icône image cassée = manquante) 2) les images correspondent-elles au texte du site 3) superpositions/éléments coupés 4) format téléphone via F12 > responsive. Décris chaque problème avec sa section exacte. Termine par RÉSULTAT: ...')."},
+                    "focus": {"type": "string", "description": "Optionnel : point précis déjà vérifié précédemment à ne PAS re-décrire en détail (ex: 'déjà validé : header et navigation ; concentre-toi sur la galerie d'images et le footer')."},
                 },
                 "required": ["mission"],
             },
@@ -1254,6 +1255,23 @@ BRAIN_TOOLS_SCHEMA = [
                     "question": {"type": "string", "description": "Contenu à valider ou question claire."},
                 },
                 "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": "Génère une image vectorielle (SVG) sur mesure pour un site : bannière, illustration de section, logo, placeholder cohérent avec le secteur (boulangerie, garage, restaurant...). L'image est écrite sur le disque et utilisable directement dans le HTML via <img src=...>. N'hésite pas à l'utiliser quand une image manque, est cassée, ou ne correspond pas au contenu du site.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Chemin du fichier .svg à créer (ex: C:\\Agent\\workspace\\demo_sites\\boulangerie\\images\\hero.svg)."},
+                    "description": {"type": "string", "description": "Description de l'image souhaitée : sujet, couleurs (hex), ambiance, texte éventuel à intégrer, format paysage/carré."},
+                    "width": {"type": "integer", "default": 1200},
+                    "height": {"type": "integer", "default": 600},
+                },
+                "required": ["path", "description"],
             },
         },
     },
@@ -1436,7 +1454,12 @@ def run_mistral_brain_loop(task: str, app_instance, use_mistral_tandem=True):
         "RÈGLES D'HONNÊTETÉ FACTUELLE :\n"
         "- N'affirme JAMAIS qu'une vérification a été faite si elle ne l'a pas été (pas de 'testé en simulation', pas de 'vérifié visuellement' sans rapport Terra ou preuve).\n"
         "- Pour toute vérification visuelle, utilise delegate_terra et cite SON rapport.\n"
-        "- Les dates : donne la date du jour réelle, pas des dates inventées."
+        "- Les dates : donne la date du jour réelle, pas des dates inventées.\n\n"
+        "RÈGLES DE VÉRIFICATION VISUELLE EFFICACE :\n"
+        "- Chaque delegate_terra de vérification doit porter une CHECKLIST précise (images affichées ? cohérence image-texte ? superpositions ? format téléphone ?) : donne la checklist dans la mission, sinon Terra décrira la page en général et ratera des détails.\n"
+        "- Utilise le paramètre focus pour ne pas re-décrire ce qui est déjà validé (ex: 'déjà validé : header ; vérifie uniquement la galerie'). Ne re-valide JAMAIS entièrement une page pour un détail ponctuel.\n"
+        "- Si Terra signale une image manquante/cassée ou incohérente avec le texte, corrige IMMÉDIATEMENT : utilise generate_image pour créer une image sur mesure (bannière, illustration, placeholder sectoriel) adaptée au site et à sa section, mets à jour le HTML, puis fais re-vérifier SEULEMENT la section corrigée.\n"
+        "- N'hésite jamais à générer une image : mieux vaut une illustration propre et cohérente qu'un placeholder générique ou une image cassée."
     )
 
     messages = [
@@ -1543,6 +1566,13 @@ def run_mistral_brain_loop(task: str, app_instance, use_mistral_tandem=True):
             elif fn == "read_mailbox":
                 result = brain_read_mailbox(fn_args.get("max_mails", 10), fn_args.get("unread_only", False))
 
+            elif fn == "generate_image":
+                log_msg(f"🎨 Génération image : {fn_args.get('description', '')[:100]}\n", "agent")
+                result = brain_generate_image(
+                    fn_args.get("path", ""), fn_args.get("description", ""),
+                    fn_args.get("width", 1200), fn_args.get("height", 600),
+                )
+
             else:
                 result = f"Outil inconnu : {fn}"
 
@@ -1550,6 +1580,52 @@ def run_mistral_brain_loop(task: str, app_instance, use_mistral_tandem=True):
 
     log_msg("⚠️ Limite d'étapes du cerveau atteinte ; mission arrêtée.\n", "error")
     return True
+
+
+def brain_generate_image(path: str, description: str, width: int = 1200, height: int = 600) -> str:
+    """
+    Génère une image SVG sur mesure via Mistral : le modèle écrit directement le code SVG
+    (formes, couleurs, textes) adapté à la description. Écrit sur disque et retourné au cerveau,
+    qui peut ensuite corriger/itérer sur le même fichier.
+    """
+    mistral_key = get_mistral_api_key()
+    if not mistral_key:
+        return "Génération d'image indisponible : pas de clé Mistral."
+    try:
+        w = max(64, min(4000, int(width)))
+        h = max(64, min(4000, int(height)))
+        client = OpenAI(base_url="https://api.mistral.ai/v1", api_key=mistral_key, timeout=60.0)
+        sys_prompt = (
+            "Tu es un illustrateur vectoriel. Génère UNIQUEMENT le code SVG (balise <svg> complète, sans texte autour, "
+            "sans balise ```svg) d'une illustration professionnelle et moderne. Contraintes : viewBox cohérente, "
+            "couleurs harmonieuses et modernes, formes lisses, dégradés subtils autorisés, texte lisible si demandé. "
+            "L'image doit être IMMÉDIATEMENT utilisable dans une page web.")
+        resp = client.chat.completions.create(
+            model="mistral-large-latest",
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": f"Image {w}x{h}. Description : {description}"},
+            ],
+            temperature=0.4,
+            max_tokens=3500,
+        )
+        svg = (resp.choices[0].message.content or "").strip()
+        if not svg.startswith("<svg"):
+            import re as _re
+            m = _re.search(r"<svg.*</svg>", svg, _re.DOTALL)
+            if not m:
+                return "Échec génération : le modèle n'a pas produit de SVG valide."
+            svg = m.group(0)
+        write_result = brain_write_file(path, svg)
+        if not write_result.startswith("Fichier écrit"):
+            return f"SVG généré mais écriture échouée : {write_result}"
+        return (
+            f"Image générée : {write_result.split(' : ', 1)[1].split(' (')[0]} « {description[:80]} » ({len(svg)} caractères SVG). "
+            f"Utilise-la dans le HTML avec un chemin relatif ou absolu. Pour l'affiner, rappelle generate_image "
+            f"avec le même chemin et une description précise de la correction."
+        )
+    except Exception as e:
+        return f"Erreur génération image : {e}"
 
 
 def _vibe_executable() -> str | None:
