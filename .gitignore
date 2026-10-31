@@ -7,3 +7,4 @@ missions.log
 __pycache__/
 *.pyc
 attachments/
+workspace/
