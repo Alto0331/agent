@@ -12,6 +12,7 @@ Lancement : agent_server.py appelle start_server(...) avec les hooks nécessaire
 """
 
 import json
+import os
 import hashlib
 import secrets
 import threading
@@ -25,15 +26,35 @@ LOG_BUFFER_MAX = 3000
 
 
 class WebHub:
-    """Cœur d'état partagé : logs, instance courante, sessions."""
+    """Cœur d'état partagé : logs, instance courante, sessions.
+    Les tokens sont persistés sur disque : ils survivent aux redémarrages du serveur."""
+
+    TOKENS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web_tokens.json")
 
     def __init__(self):
         self.logs = []            # [{"id": int, "ts": float, "text": str, "tag": str}]
         self.log_id = 0
         self.lock = threading.Lock()
         self.tokens = set()       # tokens de session valides
+        self._load_tokens()
         self.current_instance = None
         self.hooks = {}           # rempli par start_server
+
+    def _load_tokens(self):
+        try:
+            if os.path.exists(self.TOKENS_FILE):
+                with open(self.TOKENS_FILE, "r", encoding="utf-8-sig") as f:
+                    data = json.load(f)
+                self.tokens = set(t for t in data.get("tokens", []) if isinstance(t, str))
+        except Exception:
+            self.tokens = set()
+
+    def _save_tokens(self):
+        try:
+            with open(self.TOKENS_FILE, "w", encoding="utf-8") as f:
+                json.dump({"tokens": list(self.tokens)}, f)
+        except Exception:
+            pass
 
     def append_log(self, text: str, tag: str = "system"):
         with self.lock:
@@ -50,11 +71,18 @@ class WebHub:
         tok = secrets.token_urlsafe(32)
         with self.lock:
             self.tokens.add(tok)
+        self._save_tokens()
         return tok
 
     def valid_token(self, tok: str) -> bool:
         with self.lock:
             return tok in self.tokens
+
+    def revoke_all(self):
+        """Révoque toutes les sessions (appelé quand le PIN change)."""
+        with self.lock:
+            self.tokens = set()
+        self._save_tokens()
 
 
 HUB = WebHub()
@@ -250,7 +278,14 @@ select.txt{margin:6px 0}
 </main>
 </div>
 <script>
-let TOKEN=localStorage.getItem('wa_tok')||'';
+function saveTok(t){try{localStorage.setItem('wa_tok',t);}catch(e){}
+  try{sessionStorage.setItem('wa_tok',t);}catch(e){}
+  try{document.cookie='wa_tok='+t+';path=/;max-age=31536000;SameSite=Strict';}catch(e){}}
+function loadTok(){try{let t=localStorage.getItem('wa_tok');if(t)return t;}catch(e){}
+  try{let t=sessionStorage.getItem('wa_tok');if(t)return t;}catch(e){}
+  try{let m=document.cookie.match(/(?:^|; )wa_tok=([^;]+)/);if(m)return m[1];}catch(e){}
+  return '';}
+let TOKEN=loadTok();
 let lastId=0;
 const $=id=>document.getElementById(id);
 function toggleMenu(){const s=$('sidebar');const o=$('overlay');
@@ -266,7 +301,7 @@ const api=(path,data)=>fetch('/api/'+path,{method:data?'POST':'GET',
 async function login(){
   const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({pin:$('pin').value})}).then(r=>r.json());
-  if(r.ok){TOKEN=r.token;localStorage.setItem('wa_tok',TOKEN);location.reload();}
+  if(r.ok){TOKEN=r.token;saveTok(TOKEN);location.reload();}
   else{$('loginErr').textContent='PIN incorrect';}}
 $('pin').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
 async function sendMission(){
@@ -332,7 +367,7 @@ async function addSender(){const v=$('newSender').value.trim();
 async function rmSender(em){if(confirm('Retirer '+em+' ?')){await api('trust',{email:em,add:false});loadSettings();}}
 async function changePin(){const v=$('newPin').value.trim();
   if(v.length!==6){alert('Le PIN doit faire 6 chiffres');return;}
-  await api('pin',{pin:v});alert('PIN modifié');}
+  const r=await api('pin',{pin:v});if(r.ok&&r.reconnected_token){TOKEN=r.reconnected_token;saveTok(TOKEN);alert('PIN modifié');}else{alert(r.error||'Erreur');}}
 async function loadMissions(){
   const r=await api('missions');
   $('missions').innerHTML=r.html||'Aucune mission enregistrée.';}
@@ -358,6 +393,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _auth_ok(self) -> bool:
         tok = self.headers.get("X-Auth", "")
+        if not tok:
+            cookie = self.headers.get("Cookie", "")
+            for part in cookie.split(";"):
+                if part.strip().startswith("wa_tok="):
+                    tok = part.strip().split("=", 1)[1]
+                    break
         return HUB.valid_token(tok)
 
     def do_GET(self):
@@ -493,7 +534,8 @@ class Handler(BaseHTTPRequestHandler):
             new_pin = str(data.get("pin", "")).strip()
             if len(new_pin) == 6 and new_pin.isdigit():
                 HUB.hooks["save_credentials"]({"web_pin": new_pin})
-                return self._json({"ok": True})
+                HUB.revoke_all()
+                return self._json({"ok": True, "reconnected_token": HUB.new_token()})
             return self._json({"ok": False, "error": "PIN invalide (6 chiffres)"})
 
         self._json({"ok": False, "error": "route inconnue"}, 404)

@@ -8,3 +8,4 @@ __pycache__/
 *.pyc
 attachments/
 workspace/
+web_tokens.json
