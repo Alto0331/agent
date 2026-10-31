@@ -9,3 +9,4 @@ __pycache__/
 attachments/
 workspace/
 web_tokens.json
+web_sessions.json
