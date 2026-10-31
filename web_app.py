@@ -123,15 +123,20 @@ PAGE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
 <title>Agent VM</title>
 <style>
-:root{--bg:#0f172a;--card:#1e293b;--acc:#38bdf8;--ok:#4ade80;--err:#f87171;--txt:#e2e8f0;--mut:#94a3b8}
+:root{--bg:#0f172a;--card:#1e293b;--acc:#38bdf8;--ok:#4ade80;--err:#f87171;--txt:#e2e8f0;--mut:#94a3b8;--side:#111a2e}
 *{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',system-ui,sans-serif}
-body{background:var(--bg);color:var(--txt);min-height:100vh;padding-bottom:70px}
-header{background:var(--card);padding:14px 16px;position:sticky;top:0;z-index:10;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #334155}
-header h1{font-size:17px}.dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:8px}
+body{background:var(--bg);color:var(--txt);min-height:100vh}
+header{background:var(--card);padding:14px 16px;position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:12px;border-bottom:1px solid #334155}
+.hamb{background:none;border:none;color:var(--txt);font-size:22px;cursor:pointer;padding:4px 8px}
+header h1{font-size:17px;flex:1}
+.dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+#sidebar{position:fixed;top:0;left:-270px;width:260px;height:100vh;background:var(--side);z-index:30;transition:left .25s;display:flex;flex-direction:column;border-right:1px solid #334155}
+#sidebar.open{left:0}
+#sidebar .head{padding:18px 16px;border-bottom:1px solid #334155;font-weight:700;font-size:16px}
+#sidebar button{background:none;border:none;color:var(--txt);text-align:left;padding:14px 18px;font-size:15px;cursor:pointer;border-left:3px solid transparent}
+#sidebar button.on{background:#1c2a45;border-left:3px solid var(--acc);color:var(--acc)}
+#overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:25;display:none}
 main{max-width:760px;margin:0 auto;padding:14px}
-nav{position:fixed;bottom:0;left:0;right:0;background:var(--card);display:flex;border-top:1px solid #334155;z-index:10}
-nav button{flex:1;background:none;border:none;color:var(--mut);padding:12px 4px;font-size:12px;cursor:pointer}
-nav button.on{color:var(--acc);border-top:2px solid var(--acc)}
 .card{background:var(--card);border-radius:12px;padding:14px;margin-bottom:12px}
 .tag-sys{color:var(--mut)}.tag-agent{color:var(--acc)}.tag-user{color:var(--ok)}.tag-error{color:var(--err)}
 #logs{font-size:13px;line-height:1.55;word-wrap:break-word;white-space:pre-wrap}
@@ -141,13 +146,16 @@ textarea{min-height:90px;resize:vertical}
 .btn{background:var(--acc);color:#04121f;border:none;border-radius:10px;padding:12px 20px;font-size:15px;font-weight:600;cursor:pointer;width:100%}
 .btn.sec{background:#334155;color:var(--txt)}
 .btn:disabled{opacity:.5}
-input.txt{margin:8px 0}
+input.txt{margin:6px 0}
 label{font-size:12px;color:var(--mut);display:block;margin-top:10px}
+h2{font-size:15px;margin-bottom:10px}
 .pill{display:inline-block;background:#334155;border-radius:999px;padding:6px 12px;margin:4px;font-size:13px}
 .pill button{background:none;border:none;color:var(--err);cursor:pointer;margin-left:6px}
-h2{font-size:15px;margin-bottom:10px}
-#login{max-width:380px;margin:14vh auto 0}
 .mut{color:var(--mut);font-size:12px}
+#login{max-width:380px;margin:14vh auto 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+select.txt{margin:6px 0}
+.ok-err{margin-top:8px;font-size:13px}
 </style>
 </head>
 <body>
@@ -158,12 +166,23 @@ h2{font-size:15px;margin-bottom:10px}
   <p class="mut" id="loginErr" style="color:var(--err);margin-top:8px"></p>
 </div>
 <div id="app" style="display:none">
-<header><h1><span class="dot" id="dot"></span>Agent VM</h1><span class="mut" id="engineLbl"></span></header>
+<div id="overlay" onclick="toggleMenu()"></div>
+<div id="sidebar">
+  <div class="head">🤖 Agent VM</div>
+  <button id="s-chat" class="on" onclick="tab('chat')">💬 Chat</button>
+  <button id="s-problems" onclick="tab('problems')">🚨 Problèmes</button>
+  <button id="s-settings" onclick="tab('settings')">⚙️ Réglages</button>
+</div>
+<header>
+  <button class="hamb" onclick="toggleMenu()">☰</button>
+  <h1><span class="dot" id="dot"></span>Agent VM</h1>
+  <span class="mut" id="engineLbl"></span>
+</header>
 <main>
   <section id="tab-chat">
     <div class="card" id="logsCard"><div id="logs"></div></div>
     <div class="card">
-      <textarea id="mission" placeholder="Ta mission pour l'agent... (ex: trouve 5 entreprises de Poitiers...)"></textarea>
+      <textarea id="mission" placeholder="Ta mission pour l'agent..."></textarea>
       <div style="display:flex;gap:8px;margin-top:10px">
         <button class="btn" id="btnSend" onclick="sendMission()">🚀 Lancer</button>
         <button class="btn sec" id="btnStop" onclick="stopMission()">⏹ Stop</button>
@@ -177,98 +196,139 @@ h2{font-size:15px;margin-bottom:10px}
   <section id="tab-problems" style="display:none">
     <div class="card"><h2>🧭 Missions récentes</h2><div id="missions" class="mut">Chargement...</div></div>
     <div class="card"><h2>🛠️ Infrastructure</h2>
-      <p class="mut">Surveillance Proxmox/RMM : disponible dans une prochaine étape (V.3.3). Les incidents apparaîtront ici avec bouton d'approbation.</p></div>
+      <p class="mut">Surveillance Proxmox/RMM : prochaine étape (V.3.3).</p></div>
   </section>
   <section id="tab-settings" style="display:none">
-    <div class="card"><h2>⚙️ Moteur</h2><div id="engineBox">Chargement...</div></div>
-    <div class="card"><h2>📧 Expéditeurs de confiance</h2>
+    <div class="card"><h2>🧠 Moteur d'exécution</h2>
+      <label>Mode</label>
+      <select id="set-engine" class="txt">
+        <option value="terra">GPT-6.1 Terra</option>
+        <option value="lite">Claude Haiku 5.5 (Lite)</option>
+        <option value="local">Ollama local</option>
+      </select>
+      <div id="ollamaBox" style="display:none">
+        <label>URL Ollama</label><input id="set-ollama-url" class="txt" placeholder="http://localhost:11434">
+        <label>Modèle</label><input id="set-ollama-model" class="txt" placeholder="qwen2.5-vl:7b">
+      </div>
+      <p class="mut ok-err" id="engineState"></p>
+    </div>
+    <div class="card"><h2>🔑 Clés API</h2>
+      <label>OpenRouter</label><input id="set-orkey" class="txt" type="password" placeholder="Laisser vide = inchangé">
+      <label>Mistral (cerveau)</label><input id="set-mistralkey" class="txt" type="password" placeholder="Laisser vide = inchangé">
+      <p class="mut ok-err" id="keysState"></p>
+    </div>
+    <div class="card"><h2>📧 Mail de l'agent (Terra)</h2>
+      <label>Adresse</label><input id="set-terra-mail" class="txt" placeholder="agent@gmail.com">
+      <label>Mot de passe d'application</label><input id="set-terra-pwd" class="txt" type="password" placeholder="Laisser vide = inchangé">
+      <label>Expéditeur autorisé (missions mail)</label><input id="set-auth-sender" class="txt" placeholder="ton@email.com">
+      <p class="mut ok-err" id="mailState"></p>
+    </div>
+    <div class="card"><h2>👤 Compte principal (connexions web)</h2>
+      <label>Email</label><input id="set-main-mail" class="txt">
+      <label>Mot de passe</label><input id="set-main-pwd" class="txt" type="password" placeholder="Laisser vide = inchangé">
+    </div>
+    <div class="card"><h2>🤝 Expéditeurs de confiance</h2>
       <input id="newSender" class="txt" placeholder="email@a-ajouter.com">
       <button class="btn sec" onclick="addSender()">➕ Ajouter</button>
       <div id="senders" style="margin-top:10px"></div></div>
-    <div class="card"><h2>🔑 PIN d'accès</h2>
+    <div class="card"><h2>🔐 PIN d'accès</h2>
       <input id="newPin" class="txt" placeholder="Nouveau PIN (6 chiffres)">
       <button class="btn sec" onclick="changePin()">Changer le PIN</button></div>
+    <button class="btn" onclick="saveAll()">💾 Sauvegarder tout</button>
+    <p class="mut ok-err" id="saveMsg" style="text-align:center"></p>
   </section>
 </main>
-<nav>
-  <button id="n-chat" class="on" onclick="tab('chat')">💬 Chat</button>
-  <button id="n-problems" onclick="tab('problems')">🚨 Problèmes</button>
-  <button id="n-settings" onclick="tab('settings')">⚙️ Réglages</button>
-</nav>
 </div>
 <script>
 let TOKEN=localStorage.getItem('wa_tok')||'';
 let lastId=0;
+const $=id=>document.getElementById(id);
+function toggleMenu(){const s=$('sidebar');const o=$('overlay');
+  const open=s.classList.toggle('open');o.style.display=open?'block':'none';}
+function tab(t){toggleMenu();if(!$('sidebar').classList.contains('open')&&false){}
+  for(const x of['chat','problems','settings']){
+    $('tab-'+x).style.display=x===t?'block':'none';
+    $('s-'+x).className=x===t?'on':'';}
+  if(t==='settings')loadSettings();if(t==='problems')loadMissions();}
 const api=(path,data)=>fetch('/api/'+path,{method:data?'POST':'GET',
   headers:{'Content-Type':'application/json','X-Auth':TOKEN},
   body:data?JSON.stringify(data):undefined}).then(r=>r.json());
 async function login(){
   const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({pin:document.getElementById('pin').value})}).then(r=>r.json());
+    body:JSON.stringify({pin:$('pin').value})}).then(r=>r.json());
   if(r.ok){TOKEN=r.token;localStorage.setItem('wa_tok',TOKEN);location.reload();}
-  else{document.getElementById('loginErr').textContent='PIN incorrect';}
-}
-document.getElementById('pin').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
-function tab(t){for(const x of['chat','problems','settings']){
-  document.getElementById('tab-'+x).style.display=x===t?'block':'none';
-  document.getElementById('n-'+x).className=x===t?'on':'';}
-  if(t==='settings')loadSettings();if(t==='problems')loadMissions();}
+  else{$('loginErr').textContent='PIN incorrect';}}
+$('pin').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
 async function sendMission(){
-  const m=document.getElementById('mission').value.trim();if(!m)return;
+  const m=$('mission').value.trim();if(!m)return;
   if(!confirm('Lancer cette mission ?'))return;
-  document.getElementById('mission').value='';
-  await api('mission',{text:m});
-}
+  $('mission').value='';
+  const r=await api('mission',{text:m});
+  if(!r.ok)alert(r.error||'Erreur');}
 async function stopMission(){if(confirm('Arrêter la mission en cours ?'))await api('stop',{});}
-async function sendAnswer(){
-  const a=document.getElementById('answer').value.trim();if(!a)return;
-  document.getElementById('answer').value='';
-  await api('answer',{text:a});
-}
+async function sendAnswer(){const a=$('answer').value.trim();if(!a)return;
+  $('answer').value='';await api('answer',{text:a});}
 async function poll(){
   try{
     if(!TOKEN)return;
     const s=await api('status');
-    document.getElementById('dot').style.background=s.running?'var(--ok)':(s.awaiting?'var(--acc)':'var(--mut)');
-    document.getElementById('engineLbl').textContent=s.engine_label||'';
-    document.getElementById('btnSend').disabled=s.running;
-    document.getElementById('answerBox').style.display=s.awaiting?'block':'none';
+    $('dot').style.background=s.running?'var(--ok)':(s.awaiting?'var(--acc)':'var(--mut)');
+    $('engineLbl').textContent=s.engine_label||'';
+    $('btnSend').disabled=s.running;
+    $('answerBox').style.display=s.awaiting?'block':'none';
     const r=await api('logs?since='+lastId);
-    const box=document.getElementById('logs');
+    const box=$('logs');
     for(const e of r.entries){
       lastId=e.id;
       const d=document.createElement('div');d.className='log-line tag-'+e.tag;
-      d.textContent=e.text;box.appendChild(d);
-    }
+      d.textContent=e.text;box.appendChild(d);}
     if(r.entries.length)box.scrollTop=box.scrollHeight;
     if(box.children.length>300)box.removeChild(box.firstChild);
-  }catch(e){}
-}
+  }catch(e){}}
 setInterval(poll,2000);
 async function loadSettings(){
   const s=await api('settings');
-  document.getElementById('engineBox').innerHTML=
-    'Moteur actif : <b>'+(s.engine_mode||'terra')+'</b>'+(s.use_ollama?' (Ollama)':'')+'<br>'+
-    '<span class="mut">Clés configurées : Mistral '+(s.has_mistral?'✅':'❌')+
-    ' | OpenRouter '+(s.has_openrouter?'✅':'❌')+'<br>Mail agent : '+(s.terra_email||'non configuré')+'</span>';
-  const box=document.getElementById('senders');box.innerHTML='';
+  $('set-engine').value=s.engine_mode||'terra';
+  $('set-ollama-url').value=s.ollama_url||'http://localhost:11434';
+  $('set-ollama-model').value=s.ollama_model||'qwen2.5-vl:7b';
+  $('ollamaBox').style.display=($('set-engine').value==='local')?'block':'none';
+  $('set-terra-mail').value=s.terra_email||'';
+  $('set-auth-sender').value=s.auth_sender||'';
+  $('set-main-mail').value=s.main_email||'';
+  $('keysState').textContent='OpenRouter '+(s.has_openrouter?'✅ configuré':'❌ absent')+' | Mistral '+(s.has_mistral?'✅ configuré':'❌ absent');
+  $('mailState').textContent='Mail '+(s.terra_email?'✅ '+s.terra_email:'❌ non configuré');
+  $('engineState').textContent='Mode actuel : '+(s.engine_mode||'terra')+(s.use_ollama?' (Ollama)':'');
+  const box=$('senders');box.innerHTML='';
   for(const em of s.trusted_senders){
     const p=document.createElement('span');p.className='pill';
-    p.innerHTML=em+' <button onclick="rmSender(\\''+em+'\\')">✕</button>';box.appendChild(p);}
-}
-async function addSender(){const v=document.getElementById('newSender').value.trim();
+    p.innerHTML=em+' <button onclick="rmSender(\''+em+'\')">✕</button>';box.appendChild(p);}}
+$('set-engine').addEventListener('change',()=>{$('ollamaBox').style.display=$('set-engine').value==='local'?'block':'none';});
+async function saveAll(){
+  const payload={engine_mode:$('set-engine').value,
+    ollama_url:$('set-ollama-url').value,ollama_model:$('set-ollama-model').value,
+    terra_mail_address:$('set-terra-mail').value,terra_authorized_sender:$('set-auth-sender'),
+    main_account_email:$('set-main-mail')};
+  const ork=$('set-orkey').value.trim();if(ork)payload.openrouter_key=ork;
+  const mk=$('set-mistralkey').value.trim();if(mk)payload.mistral_api_key=mk;
+  const tp=$('set-terra-pwd').value.trim();if(tp)payload.terra_mail_app_password=tp;
+  const mp=$('set-main-pwd').value.trim();if(mp)payload.main_account_password=mp;
+  if(payload.engine_mode==='local')payload.use_ollama=true;else payload.use_ollama=false;
+  const r=await api('sync',payload);
+  $('saveMsg').textContent=r.ok?'✅ Sauvegardé et synchronisé avec la VM':'❌ '+(r.error||'Erreur');
+  $('saveMsg').style.color=r.ok?'var(--ok)':'var(--err)';
+  if(r.ok){$('set-orkey').value='';$('set-mistralkey').value='';$('set-terra-pwd').value='';$('set-main-pwd').value='';loadSettings();}}
+async function addSender(){const v=$('newSender').value.trim();
   if(v){await api('trust',{email:v,add:true});loadSettings();}}
 async function rmSender(em){if(confirm('Retirer '+em+' ?')){await api('trust',{email:em,add:false});loadSettings();}}
-async function changePin(){const v=document.getElementById('newPin').value.trim();
+async function changePin(){const v=$('newPin').value.trim();
   if(v.length!==6){alert('Le PIN doit faire 6 chiffres');return;}
   await api('pin',{pin:v});alert('PIN modifié');}
 async function loadMissions(){
   const r=await api('missions');
-  document.getElementById('missions').innerHTML=r.html||'Aucune mission enregistrée.';
-}
+  $('missions').innerHTML=r.html||'Aucune mission enregistrée.';}
 (async()=>{if(TOKEN){const s=await api('status').catch(()=>null);
-  if(s&&s.ok!==false){document.getElementById('login').style.display='none';
-  document.getElementById('app').style.display='block';poll();}}})();
+  if(s&&s.ok!==false){$('login').style.display='none';
+  $('app').style.display='block';poll();}}})();
 </script>
 </body>
 </html>"""
@@ -327,9 +387,13 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "engine_mode": creds.get("engine_mode", "terra"),
                 "use_ollama": bool(creds.get("use_ollama")),
+                "ollama_url": creds.get("ollama_url", "http://localhost:11434"),
+                "ollama_model": creds.get("ollama_model", "qwen2.5-vl:7b"),
                 "has_mistral": bool(HUB.hooks.get("has_mistral")()),
-                "has_openrouter": bool(creds.get("extra_api_key") or HUB.hooks.get("has_openrouter")()),
+                "has_openrouter": bool(HUB.hooks.get("has_openrouter")()),
                 "terra_email": creds.get("terra_mail_address", ""),
+                "auth_sender": creds.get("terra_authorized_sender", ""),
+                "main_email": creds.get("main_account_email", ""),
                 "trusted_senders": trusted,
             })
 
@@ -388,6 +452,20 @@ class Handler(BaseHTTPRequestHandler):
                 inst._awaiting = False
             return self._json({"ok": True})
 
+        if u.path == "/api/sync":
+            allowed = [
+                "engine_mode", "use_ollama", "ollama_url", "ollama_model",
+                "openrouter_key", "mistral_api_key",
+                "terra_mail_address", "terra_mail_app_password", "terra_authorized_sender",
+                "main_account_email", "main_account_password",
+            ]
+            payload = {k: v for k, v in data.items() if k in allowed and v != ""}
+            try:
+                HUB.hooks["apply_credentials_sync"](payload, HUB.current_instance)
+                return self._json({"ok": True})
+            except Exception as e:
+                return self._json({"ok": False, "error": str(e)})
+
         if u.path == "/api/trust":
             email = str(data.get("email", "")).strip().lower()
             add = bool(data.get("add", True))
@@ -417,11 +495,12 @@ class WebServer(ThreadingHTTPServer):
 def start_server(start_task, make_instance, load_credentials, save_credentials,
                  load_trusted_senders, save_trusted_senders,
                  has_mistral_fn=None, has_openrouter_fn=None, queue_len_fn=None,
-                 missions_html_fn=None, on_web_complete=None):
+                 missions_html_fn=None, on_web_complete=None, apply_credentials_sync=None):
     """Lancé par agent_server.py dans un thread daemon."""
     HUB.hooks = {
         "start_task": start_task,
         "make_instance": make_instance,
+        "apply_credentials_sync": apply_credentials_sync or save_credentials,
         "load_credentials": load_credentials,
         "save_credentials": save_credentials,
         "load_trusted_senders": load_trusted_senders,

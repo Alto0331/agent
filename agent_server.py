@@ -1630,6 +1630,30 @@ def brain_generate_image(path: str, description: str, width: int = 1200, height:
         return f"Erreur génération image : {e}"
 
 
+def apply_credentials_sync(msg: dict, app_instance=None) -> dict:
+    """Applique une synchro de credentials (app Tkinter ou web) : sauvegarde + reconfiguration runtime."""
+    or_key = msg.get("openrouter_key", "").strip()
+    if or_key:
+        save_api_key(or_key)
+        if app_instance is not None:
+            app_instance.awaiting_api_key = False
+
+    if not str(msg.get("mistral_api_key", "")).strip() and msg.get("extra_api_name", "").lower().startswith("mistral") and msg.get("extra_api_key"):
+        msg["mistral_api_key"] = msg.get("extra_api_key").strip()
+
+    saved = save_credentials(msg)
+    if app_instance is not None:
+        new_mode = saved.get("engine_mode", app_instance.engine_mode)
+        if saved.get("use_ollama", False):
+            new_mode = "local"
+        app_instance.engine_mode = new_mode
+    else:
+        new_mode = "local" if saved.get("use_ollama", False) else saved.get("engine_mode", "terra")
+    configure_runtime_for_mode(new_mode, saved)
+    MAIL_WATCHER.last_error_logged = ""
+    return saved
+
+
 def _vibe_executable() -> str | None:
     cand = os.path.join(os.path.dirname(sys.executable), "Scripts", "vibe.exe")
     if os.path.exists(cand):
@@ -1774,26 +1798,11 @@ def handle_client(conn, addr):
                         app_instance.log("🚀 Mode TERRA (OpenAI GPT-6.1 Terra) activé.\n", "system")
 
                 elif msg_type == "sync_credentials":
-                    or_key = msg.get("openrouter_key", "").strip()
-                    if or_key:
-                        save_api_key(or_key)
-                        app_instance.awaiting_api_key = False
-
-                    if not str(msg.get("mistral_api_key", "")).strip() and msg.get("extra_api_name", "").lower().startswith("mistral") and msg.get("extra_api_key"):
-                        msg["mistral_api_key"] = msg["extra_api_key"].strip()
-
-                    saved = save_credentials(msg)
-                    new_mode = saved.get("engine_mode", app_instance.engine_mode)
-                    if saved.get("use_ollama", False):
-                        new_mode = "local"
-                    app_instance.engine_mode = new_mode
-                    configure_runtime_for_mode(new_mode, saved)
-
-                    t_mail = bool(saved.get("terra_mail_address") and saved.get("terra_mail_app_password"))
+                    saved = apply_credentials_sync(msg, app_instance)
                     m_ready = bool(get_mistral_api_key())
-                    MAIL_WATCHER.last_error_logged = ""
+                    t_mail = bool(saved.get("terra_mail_address") and saved.get("terra_mail_app_password"))
                     app_instance.log(
-                        f"✅ Paramètres synchronisés (Mode: {new_mode.upper()} | Codeur Mistral: {'ACTIF' if m_ready else 'OFF'} | Mail Terra: {'OK' if t_mail else 'OFF'}).\n",
+                        f"✅ Paramètres synchronisés (Mode: {saved.get('engine_mode', 'terra').upper()} | Codeur Mistral: {'ACTIF' if m_ready else 'OFF'} | Mail Terra: {'OK' if t_mail else 'OFF'}).\n",
                         "system"
                     )
 
@@ -1934,6 +1943,7 @@ if __name__ == "__main__":
         web_app.start_server(
             start_task=lambda t, inst, on_complete=None: start_agent_task(t, inst, on_complete=on_complete, use_mistral=True),
             make_instance=_make_web_instance,
+            apply_credentials_sync=apply_credentials_sync,
             load_credentials=load_credentials,
             save_credentials=save_credentials,
             load_trusted_senders=load_trusted_senders,
