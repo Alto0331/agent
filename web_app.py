@@ -137,106 +137,138 @@ def ensure_pin(creds_fn, save_fn) -> str:
 
 
 def open_firewall_port(port=WEB_PORT):
+    """Crée la règle pare-feu si elle n'existe pas VRAIMENT.
+    Note : 'netsh show rule' renvoie souvent code 0 même sans correspondance,
+    on vérifie donc la sortie réelle, et on tente l'ajout avec profile=any
+    (couvre Domaine/Privé/Public, nécessaire pour l'interface Tailscale)."""
     try:
-        subprocess.run(
+        r = subprocess.run(
             ["netsh", "advfirewall", "firewall", "show", "rule", "name=AgentWebApp"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+            capture_output=True, text=True
         )
+        already = "AgentWebApp" in (r.stdout or "")
     except Exception:
+        already = False
+    if already:
+        return
+    for profile in ("any",):
         try:
             subprocess.run(
                 ["netsh", "advfirewall", "firewall", "add", "rule",
                  "name=AgentWebApp", "dir=in", "action=allow",
-                 "protocol=TCP", f"localport={port}"],
+                 "protocol=TCP", f"localport={port}", f"profile={profile}"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
         except Exception:
             pass
+    print(f"[WebApp] 🛡️ Règle pare-feu 'AgentWebApp' créée (TCP {port}, tous profils) — nécessaire pour l'accès Tailscale/VPN.")
 
 
 PAGE = """<!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <title>Agent VM</title>
 <style>
-:root{--bg:#0f172a;--card:#1e293b;--acc:#38bdf8;--ok:#4ade80;--err:#f87171;--txt:#e2e8f0;--mut:#94a3b8;--side:#111a2e}
-*{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',system-ui,sans-serif}
-body{background:var(--bg);color:var(--txt);min-height:100vh}
-header{background:var(--card);padding:14px 16px;position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:12px;border-bottom:1px solid #334155}
-.hamb{background:none;border:none;color:var(--txt);font-size:22px;cursor:pointer;padding:4px 8px}
-header h1{font-size:17px;flex:1}
-.dot{width:10px;height:10px;border-radius:50%;display:inline-block}
-#sidebar{position:fixed;top:0;left:-270px;width:260px;height:100vh;background:var(--side);z-index:30;transition:left .25s;display:flex;flex-direction:column;border-right:1px solid #334155}
+:root{--bg:#0f172a;--card:#1e293b;--card2:#24334a;--acc:#38bdf8;--acc2:#0ea5e9;--ok:#4ade80;--err:#f87171;--warn:#fbbf24;--txt:#e2e8f0;--mut:#94a3b8;--side:#0b1220;--line:#334155}
+*{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;-webkit-tap-highlight-color:transparent}
+body{background:var(--bg);color:var(--txt);min-height:100vh;padding-bottom:env(safe-area-inset-bottom)}
+header{background:rgba(15,23,42,.92);backdrop-filter:blur(8px);padding:14px 16px;position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line)}
+.hamb{background:var(--card);border:1px solid var(--line);color:var(--txt);font-size:17px;cursor:pointer;padding:6px 11px;border-radius:9px}
+header .title{flex:1;display:flex;align-items:center;gap:9px}
+header h1{font-size:16px;font-weight:600;letter-spacing:.2px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--mut);box-shadow:0 0 8px transparent;transition:all .3s}
+.dot.run{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+.dot.wait{background:var(--warn);box-shadow:0 0 8px var(--warn)}
+#engineLbl{font-size:11px;color:var(--mut);background:var(--card);border:1px solid var(--line);padding:5px 10px;border-radius:999px;white-space:nowrap}
+#sidebar{position:fixed;top:0;left:-280px;width:270px;height:100vh;background:var(--side);z-index:30;transition:left .25s ease;display:flex;flex-direction:column;border-right:1px solid var(--line)}
 #sidebar.open{left:0}
-#sidebar .head{padding:18px 16px;border-bottom:1px solid #334155;font-weight:700;font-size:16px}
-#sidebar button{background:none;border:none;color:var(--txt);text-align:left;padding:14px 18px;font-size:15px;cursor:pointer;border-left:3px solid transparent}
-#sidebar button.on{background:#1c2a45;border-left:3px solid var(--acc);color:var(--acc)}
-#overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:25;display:none}
-main{max-width:760px;margin:0 auto;padding:14px}
-.card{background:var(--card);border-radius:12px;padding:14px;margin-bottom:12px}
+#sidebar .head{padding:20px 18px;border-bottom:1px solid var(--line);font-weight:700;font-size:16px;display:flex;align-items:center;gap:10px}
+#sidebar .head .dot{margin-left:auto}
+#sidebar button{background:none;border:none;color:var(--txt);text-align:left;padding:15px 18px;font-size:15px;cursor:pointer;border-left:3px solid transparent;display:flex;gap:12px;align-items:center;transition:background .15s}
+#sidebar button:active{background:#16203a}
+#sidebar button.on{background:#12233c;border-left:3px solid var(--acc);color:var(--acc)}
+#sidebar .foot{margin-top:auto;padding:14px 18px;font-size:11px;color:var(--mut);border-top:1px solid var(--line)}
+#overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:25;display:none;opacity:0;transition:opacity .25s}
+main{max-width:780px;margin:0 auto;padding:16px 14px 30px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:0 2px 8px rgba(0,0,0,.18)}
+.card h2{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--mut);margin-bottom:12px;display:flex;align-items:center;gap:8px}
 .tag-sys{color:var(--mut)}.tag-agent{color:var(--acc)}.tag-user{color:var(--ok)}.tag-error{color:var(--err)}
-#logs{font-size:13px;line-height:1.55;word-wrap:break-word;white-space:pre-wrap}
-.log-line{padding:3px 0;border-bottom:1px solid #293548}
-textarea,.txt{width:100%;background:#0b1220;color:var(--txt);border:1px solid #334155;border-radius:10px;padding:12px;font-size:15px}
-textarea{min-height:90px;resize:vertical}
-.btn{background:var(--acc);color:#04121f;border:none;border-radius:10px;padding:12px 20px;font-size:15px;font-weight:600;cursor:pointer;width:100%}
-.btn.sec{background:#334155;color:var(--txt)}
-.btn:disabled{opacity:.5}
-input.txt{margin:6px 0}
-label{font-size:12px;color:var(--mut);display:block;margin-top:10px}
-h2{font-size:15px;margin-bottom:10px}
-.pill{display:inline-block;background:#334155;border-radius:999px;padding:6px 12px;margin:4px;font-size:13px}
-.pill button{background:none;border:none;color:var(--err);cursor:pointer;margin-left:6px}
+#logs{font-size:13px;line-height:1.6;word-wrap:break-word;white-space:pre-wrap;max-height:44vh;overflow-y:auto;padding-right:4px}
+.log-line{padding:4px 0;border-bottom:1px solid #26324a}
+.log-line:last-child{border-bottom:none}
+textarea,.txt{width:100%;background:#0b1220;color:var(--txt);border:1px solid var(--line);border-radius:11px;padding:13px;font-size:15px;outline:none;transition:border-color .15s}
+textarea:focus,.txt:focus{border-color:var(--acc)}
+textarea{min-height:96px;resize:vertical}
+.btn{background:linear-gradient(135deg,var(--acc),var(--acc2));color:#03121f;border:none;border-radius:11px;padding:13px 20px;font-size:15px;font-weight:700;cursor:pointer;width:100%;transition:opacity .15s,transform .1s}
+.btn:active{transform:scale(.985)}
+.btn:disabled{opacity:.45}
+.btn.sec{background:var(--card2);color:var(--txt);border:1px solid var(--line)}
+input.txt{margin:7px 0}
+label{font-size:12px;color:var(--mut);display:block;margin:10px 0 2px;font-weight:600}
+.pill{display:inline-flex;align-items:center;gap:8px;background:var(--card2);border:1px solid var(--line);border-radius:999px;padding:7px 14px;margin:4px;font-size:13px}
+.pill button{background:none;border:none;color:var(--err);cursor:pointer;font-size:14px;padding:0}
 .mut{color:var(--mut);font-size:12px}
-#login{max-width:380px;margin:14vh auto 0}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-select.txt{margin:6px 0}
+#login{max-width:400px;margin:16vh auto 0}
+#login .logo{text-align:center;font-size:42px;margin-bottom:10px}
+#login h2{text-align:center;justify-content:center}
+.row{display:flex;gap:10px}
+.row .btn{flex:1}
 .ok-err{margin-top:8px;font-size:13px}
+#toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--card2);border:1px solid var(--line);color:var(--txt);padding:12px 22px;border-radius:12px;font-size:14px;z-index:50;opacity:0;transition:opacity .25s;pointer-events:none;max-width:88vw;text-align:center}
+#toast.show{opacity:1}
+.fadein{animation:fade .35s ease}
+@keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 </style>
 </head>
 <body>
-<div id="login" class="card">
+<div id="login" class="card fadein">
+  <div class="logo">🤖</div>
   <h2>🔐 Accès Agent VM</h2>
-  <input id="pin" class="txt" type="password" inputmode="numeric" placeholder="PIN à 6 chiffres">
-  <button class="btn" onclick="login()">Se connecter</button>
-  <p class="mut" id="loginErr" style="color:var(--err);margin-top:8px"></p>
+  <input id="pin" class="txt" type="password" inputmode="numeric" placeholder="PIN à 6 chiffres" autofocus>
+  <button class="btn" style="margin-top:12px" onclick="login()">Se connecter</button>
+  <p class="mut" id="loginErr" style="color:var(--err);margin-top:10px;text-align:center"></p>
 </div>
 <div id="app" style="display:none">
 <div id="overlay" onclick="toggleMenu()"></div>
 <div id="sidebar">
-  <div class="head">🤖 Agent VM</div>
-  <button id="s-chat" class="on" onclick="tab('chat')">💬 Chat</button>
-  <button id="s-problems" onclick="tab('problems')">🚨 Problèmes</button>
-  <button id="s-settings" onclick="tab('settings')">⚙️ Réglages</button>
+  <div class="head">🤖 Agent VM <span class="dot" id="dot2"></span></div>
+  <button id="s-chat" class="on" onclick="tab('chat')">💬 <span>Chat</span></button>
+  <button id="s-problems" onclick="tab('problems')">🚨 <span>Problèmes</span></button>
+  <button id="s-settings" onclick="tab('settings')">⚙️ <span>Réglages</span></button>
+  <div class="foot">Agent VM — interface locale/VPN<br>Port 8765</div>
 </div>
 <header>
   <button class="hamb" onclick="toggleMenu()">☰</button>
-  <h1><span class="dot" id="dot"></span>Agent VM</h1>
-  <span class="mut" id="engineLbl"></span>
+  <div class="title"><span class="dot" id="dot"></span><h1>Agent VM</h1></div>
+  <span id="engineLbl"></span>
 </header>
 <main>
-  <section id="tab-chat">
-    <div class="card" id="logsCard"><div id="logs"></div></div>
+  <section id="tab-chat" class="fadein">
+    <div class="card"><h2>📋 Activité en direct</h2><div id="logs"><div class="mut" style="padding:8px 0">En attente d'une mission…</div></div></div>
     <div class="card">
-      <textarea id="mission" placeholder="Ta mission pour l'agent..."></textarea>
-      <div style="display:flex;gap:8px;margin-top:10px">
-        <button class="btn" id="btnSend" onclick="sendMission()">🚀 Lancer</button>
+      <h2>🚀 Nouvelle mission</h2>
+      <textarea id="mission" placeholder="Décris ta mission pour l'agent… (ex : trouve 5 entreprises de Poitiers et fais-moi une liste)"></textarea>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" id="btnSend" onclick="sendMission()">Lancer</button>
         <button class="btn sec" id="btnStop" onclick="stopMission()">⏹ Stop</button>
       </div>
-      <div id="answerBox" style="display:none;margin-top:10px">
-        <textarea id="answer" placeholder="Ta réponse à l'agent..."></textarea>
-        <button class="btn" style="margin-top:8px" onclick="sendAnswer()">▶️ Répondre</button>
+      <div id="answerBox" style="display:none;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
+        <h2 style="color:var(--warn)">⏳ L'agent attend ta réponse</h2>
+        <textarea id="answer" placeholder="Ta réponse à l'agent…"></textarea>
+        <button class="btn" style="margin-top:10px" onclick="sendAnswer()">▶️ Répondre</button>
       </div>
     </div>
   </section>
-  <section id="tab-problems" style="display:none">
-    <div class="card"><h2>🧭 Missions récentes</h2><div id="missions" class="mut">Chargement...</div></div>
+  <section id="tab-problems" style="display:none" class="fadein">
+    <div class="card"><h2>🧭 Missions récentes</h2><div id="missions" class="mut">Chargement…</div></div>
     <div class="card"><h2>🛠️ Infrastructure</h2>
-      <p class="mut">Surveillance Proxmox/RMM : prochaine étape (V.3.3).</p></div>
+      <p class="mut">Surveillance Proxmox/RMM : disponible dans une prochaine étape (V.3.3). Les incidents apparaîtront ici avec bouton d'approbation.</p></div>
   </section>
-  <section id="tab-settings" style="display:none">
+  <section id="tab-settings" style="display:none" class="fadein">
     <div class="card"><h2>🧠 Moteur d'exécution</h2>
       <label>Mode</label>
       <select id="set-engine" class="txt">
@@ -267,16 +299,17 @@ select.txt{margin:6px 0}
     </div>
     <div class="card"><h2>🤝 Expéditeurs de confiance</h2>
       <input id="newSender" class="txt" placeholder="email@a-ajouter.com">
-      <button class="btn sec" onclick="addSender()">➕ Ajouter</button>
-      <div id="senders" style="margin-top:10px"></div></div>
+      <button class="btn sec" style="margin-top:8px" onclick="addSender()">➕ Ajouter</button>
+      <div id="senders" style="margin-top:12px"></div></div>
     <div class="card"><h2>🔐 PIN d'accès</h2>
       <input id="newPin" class="txt" placeholder="Nouveau PIN (6 chiffres)">
-      <button class="btn sec" onclick="changePin()">Changer le PIN</button></div>
+      <button class="btn sec" style="margin-top:8px" onclick="changePin()">Changer le PIN</button></div>
     <button class="btn" onclick="saveAll()">💾 Sauvegarder tout</button>
     <p class="mut ok-err" id="saveMsg" style="text-align:center"></p>
   </section>
 </main>
 </div>
+<div id="toast"></div>
 <script>
 function saveTok(t){try{localStorage.setItem('wa_tok',t);}catch(e){}
   try{sessionStorage.setItem('wa_tok',t);}catch(e){}
@@ -288,24 +321,28 @@ function loadTok(){try{let t=localStorage.getItem('wa_tok');if(t)return t;}catch
 let TOKEN=loadTok();
 let lastId=0;
 const $=id=>document.getElementById(id);
+function toast(msg,ok=true){const t=$('toast');t.textContent=msg;t.style.borderColor=ok?'var(--ok)':'var(--err)';t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600);}
 function toggleMenu(){const s=$('sidebar');const o=$('overlay');
-  const open=s.classList.toggle('open');o.style.display=open?'block':'none';}
-function tab(t){toggleMenu();if(!$('sidebar').classList.contains('open')&&false){}
-  for(const x of['chat','problems','settings']){
+  const open=s.classList.toggle('open');o.style.display=open?'block':'none';
+  requestAnimationFrame(()=>o.style.opacity=open?'1':'0');
+  setTimeout(()=>{if(!open)o.style.display='none';},250);}
+function tab(t){for(const x of['chat','problems','settings']){
     $('tab-'+x).style.display=x===t?'block':'none';
     $('s-'+x).className=x===t?'on':'';}
+  $('sidebar').classList.remove('open');$('overlay').style.opacity='0';
+  setTimeout(()=>{$('overlay').style.display='none';},250);
   if(t==='settings')loadSettings();if(t==='problems')loadMissions();}
 const api=(path,data)=>fetch('/api/'+path,{method:data?'POST':'GET',
   headers:{'Content-Type':'application/json','X-Auth':TOKEN},
   body:data?JSON.stringify(data):undefined}).then(r=>r.json());
 async function login(){
   const btn=document.querySelector('#login .btn');
-  btn.disabled=true;btn.textContent='Connexion...';
+  btn.disabled=true;btn.textContent='Connexion…';
   try{
     const resp=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({pin:$('pin').value})});
     const r=await resp.json();
-    if(r.ok){TOKEN=r.token;saveTok(TOKEN);$('loginErr').textContent='';btn.textContent='Connecté ! Redirection...';location.reload();}
+    if(r.ok){TOKEN=r.token;saveTok(TOKEN);$('loginErr').textContent='';btn.textContent='Connecté !';location.reload();}
     else{$('loginErr').textContent='PIN incorrect';}
   }catch(e){
     $('loginErr').textContent='Erreur réseau : '+(e.message||e)+' — vérifie la connexion à la VM';
@@ -317,26 +354,29 @@ async function sendMission(){
   if(!confirm('Lancer cette mission ?'))return;
   $('mission').value='';
   const r=await api('mission',{text:m});
-  if(!r.ok)alert(r.error||'Erreur');}
-async function stopMission(){if(confirm('Arrêter la mission en cours ?'))await api('stop',{});}
+  if(!r.ok)toast(r.error||'Erreur',false);else toast('Mission lancée 🚀');}
+async function stopMission(){if(confirm('Arrêter la mission en cours ?')){await api('stop',{});toast('Arrêt demandé');}}
 async function sendAnswer(){const a=$('answer').value.trim();if(!a)return;
-  $('answer').value='';await api('answer',{text:a});}
+  $('answer').value='';await api('answer',{text:a});toast('Réponse envoyée ▶️');}
 async function poll(){
   try{
     if(!TOKEN)return;
     const s=await api('status');
-    $('dot').style.background=s.running?'var(--ok)':(s.awaiting?'var(--acc)':'var(--mut)');
+    const d=$('dot'),d2=$('dot2');
+    const cls=s.running?'dot run':(s.awaiting?'dot wait':'dot');
+    d.className=cls;d2.className=cls;
     $('engineLbl').textContent=s.engine_label||'';
     $('btnSend').disabled=s.running;
     $('answerBox').style.display=s.awaiting?'block':'none';
     const r=await api('logs?since='+lastId);
     const box=$('logs');
+    if(r.entries.length&&box.querySelector('.mut'))box.innerHTML='';
     for(const e of r.entries){
       lastId=e.id;
-      const d=document.createElement('div');d.className='log-line tag-'+e.tag;
-      d.textContent=e.text;box.appendChild(d);}
+      const div=document.createElement('div');div.className='log-line tag-'+e.tag;
+      div.textContent=e.text;box.appendChild(div);}
     if(r.entries.length)box.scrollTop=box.scrollHeight;
-    if(box.children.length>300)box.removeChild(box.firstChild);
+    while(box.children.length>300)box.removeChild(box.firstChild);
   }catch(e){}}
 setInterval(poll,2000);
 async function loadSettings(){
@@ -348,33 +388,39 @@ async function loadSettings(){
   $('set-terra-mail').value=s.terra_email||'';
   $('set-auth-sender').value=s.auth_sender||'';
   $('set-main-mail').value=s.main_email||'';
-  $('keysState').textContent='OpenRouter '+(s.has_openrouter?'✅ configuré':'❌ absent')+' | Mistral '+(s.has_mistral?'✅ configuré':'❌ absent');
-  $('mailState').textContent='Mail '+(s.terra_email?'✅ '+s.terra_email:'❌ non configuré');
+  $('keysState').textContent='OpenRouter '+(s.has_openrouter?'✅ configuré':'❌ absent')+' · Mistral '+(s.has_mistral?'✅ configuré':'❌ absent');
+  $('mailState').textContent=s.terra_email?'✅ '+s.terra_email:'❌ non configuré';
   $('engineState').textContent='Mode actuel : '+(s.engine_mode||'terra')+(s.use_ollama?' (Ollama)':'');
   const box=$('senders');box.innerHTML='';
   for(const em of s.trusted_senders){
-    const p=document.createElement('span');p.className='pill';p.textContent=em+' ';const b=document.createElement('button');b.textContent='\u2715';b.onclick=()=>rmSender(em);p.appendChild(b);box.appendChild(p);}}
+    const p=document.createElement('span');p.className='pill';
+    const t=document.createElement('span');t.textContent=em;p.appendChild(t);
+    const b=document.createElement('button');b.textContent='✕';b.onclick=()=>rmSender(em);p.appendChild(b);
+    box.appendChild(p);}}
 $('set-engine').addEventListener('change',()=>{$('ollamaBox').style.display=$('set-engine').value==='local'?'block':'none';});
 async function saveAll(){
   const payload={engine_mode:$('set-engine').value,
     ollama_url:$('set-ollama-url').value,ollama_model:$('set-ollama-model').value,
-    terra_mail_address:$('set-terra-mail').value,terra_authorized_sender:$('set-auth-sender'),
+    terra_mail_address:$('set-terra-mail').value,terra_authorized_sender:$('set-auth-sender').value,
     main_account_email:$('set-main-mail')};
   const ork=$('set-orkey').value.trim();if(ork)payload.openrouter_key=ork;
   const mk=$('set-mistralkey').value.trim();if(mk)payload.mistral_api_key=mk;
   const tp=$('set-terra-pwd').value.trim();if(tp)payload.terra_mail_app_password=tp;
   const mp=$('set-main-pwd').value.trim();if(mp)payload.main_account_password=mp;
-  if(payload.engine_mode==='local')payload.use_ollama=true;else payload.use_ollama=false;
+  payload.use_ollama=(payload.engine_mode==='local');
   const r=await api('sync',payload);
-  $('saveMsg').textContent=r.ok?'✅ Sauvegardé et synchronisé avec la VM':'❌ '+(r.error||'Erreur');
-  $('saveMsg').style.color=r.ok?'var(--ok)':'var(--err)';
-  if(r.ok){$('set-orkey').value='';$('set-mistralkey').value='';$('set-terra-pwd').value='';$('set-main-pwd').value='';loadSettings();}}
+  if(r.ok){toast('Sauvegardé et synchronisé ✅');
+    $('set-orkey').value='';$('set-mistralkey').value='';$('set-terra-pwd').value='';$('set-main-pwd').value='';
+    loadSettings();}
+  else{toast(r.error||'Erreur',false);}}
 async function addSender(){const v=$('newSender').value.trim();
-  if(v){await api('trust',{email:v,add:true});loadSettings();}}
+  if(v){await api('trust',{email:v,add:true});$('newSender').value='';toast('Expéditeur ajouté');loadSettings();}}
 async function rmSender(em){if(confirm('Retirer '+em+' ?')){await api('trust',{email:em,add:false});loadSettings();}}
 async function changePin(){const v=$('newPin').value.trim();
-  if(v.length!==6){alert('Le PIN doit faire 6 chiffres');return;}
-  const r=await api('pin',{pin:v});if(r.ok&&r.reconnected_token){TOKEN=r.reconnected_token;saveTok(TOKEN);alert('PIN modifié');}else{alert(r.error||'Erreur');}}
+  if(v.length!==6){toast('Le PIN doit faire 6 chiffres',false);return;}
+  const r=await api('pin',{pin:v});
+  if(r.ok&&r.reconnected_token){TOKEN=r.reconnected_token;saveTok(TOKEN);$('newPin').value='';toast('PIN modifié ✅');}
+  else{toast(r.error||'Erreur',false);}}
 async function loadMissions(){
   const r=await api('missions');
   $('missions').innerHTML=r.html||'Aucune mission enregistrée.';}
