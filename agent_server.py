@@ -404,14 +404,32 @@ def run_mistral_analysis(raw_task: str, app_instance=None) -> tuple[str, list[st
 def load_credentials() -> dict:
     if os.path.exists(CREDENTIALS_FILE):
         try:
-            with open(CREDENTIALS_FILE, "r", encoding="utf-8") as f:
+            with open(CREDENTIALS_FILE, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
+            if not isinstance(data, dict):
+                print("[Credentials] ⚠️ credentials.json n'est pas un objet JSON valide ; ignoré.")
+                return {}
+            # Déchiffrement champ par champ : un échec isolé ne doit jamais casser tout le fichier
             for field in SENSITIVE_FIELDS:
-                if field in data and isinstance(data[field], str) and data[field]:
-                    data[field] = dpapi_decrypt(data[field])
+                try:
+                    if field in data and isinstance(data[field], str) and data[field]:
+                        data[field] = dpapi_decrypt(data[field])
+                except Exception as field_err:
+                    print(f"[Credentials] ⚠️ Déchiffrement impossible pour {field} ({field_err}) ; valeur ignorée.")
+                    data[field] = ""
             return data
-        except Exception:
-            pass
+        except json.JSONDecodeError as e:
+            print(f"[Credentials] ⚠️ credentials.json illisible (JSON invalide : {e}) !")
+            try:
+                import shutil as _shutil
+                backup = CREDENTIALS_FILE + ".corrupt"
+                _shutil.copy2(CREDENTIALS_FILE, backup)
+                print(f"[Credentials] ⚠️ Sauvegarde de secours créée : {backup}")
+            except Exception:
+                pass
+            return {}
+        except Exception as e:
+            print(f"[Credentials] ⚠️ Erreur lecture credentials.json : {e}")
     return {}
 
 
