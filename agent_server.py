@@ -374,21 +374,6 @@ class RemoteAppInstance:
         if "✅ Mission accomplie :" in clean_msg:
             self.final_summary = clean_msg.split("✅ Mission accomplie :", 1)[-1].strip()
 
-        if self.mail_reply_to and ("L'agent a besoin d'aide :" in clean_msg or "🤖 Question :" in clean_msg):
-            threading.Thread(
-                target=MAIL_WATCHER.send_email,
-                args=(
-                    self.mail_reply_to,
-                    f"Re: {self.mail_subject or 'MISSION TERRA'} [QUESTION AGENT]",
-                    (
-                        f"Bonjour,\n\nL'agent sur la VM a besoin d'une précision pour continuer sa mission :\n\n"
-                        f"👉 {clean_msg.strip()}\n\n"
-                        f"Réponds directement à cet email pour relancer l'exécution."
-                    ),
-                ),
-                daemon=True,
-            ).start()
-
         target_conn = self.conn
         if target_conn is None and ACTIVE_CLIENT_INSTANCE is not None:
             target_conn = ACTIVE_CLIENT_INSTANCE.conn
@@ -647,8 +632,9 @@ class MailWatcher:
                             continue
 
                         subject_up = subject.upper()
-                        has_keyword = any(k in subject_up for k in ["TERRA", "MISSION", "AGENT", "TASK", "VM"])
-                        if auth_sender and sender_addr != auth_sender and not has_keyword:
+                        if "MISSION TERRA" not in subject_up:
+                            continue
+                        if auth_sender and sender_addr != auth_sender:
                             continue
 
                         instruction_text = body.strip() if body.strip() else subject.strip()

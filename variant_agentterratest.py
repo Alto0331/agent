@@ -1333,7 +1333,11 @@ def run_agent(task: str, app_instance=None, max_steps: int = 45):
             log_msg("🛑 Mission interrompue.\n", "error")
             return
 
-        msg = response.choices[0].message
+        msg = response.choices[0].message if response and getattr(response, "choices", None) else None
+        if msg is None:
+            log_msg("⚠️ Réponse API vide (erreur fournisseur). Nouvelle tentative.\n", "error")
+            time.sleep(1.5)
+            continue
         tool_calls = getattr(msg, "tool_calls", None)
 
         # Si le modèle répond sans appeler d'outil
