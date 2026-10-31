@@ -509,8 +509,10 @@ class RemoteAppInstance:
             print(clean_msg, end="")
 
     def wait_for_human(self):
+        self._awaiting = True
         self.wait_event.clear()
         self.wait_event.wait()
+        self._awaiting = False
 
 
 def get_active_engine(app_instance: RemoteAppInstance):
@@ -1910,6 +1912,39 @@ if __name__ == "__main__":
 
     threading.Thread(target=MAIL_WATCHER.watch_loop, daemon=True).start()
     threading.Thread(target=_watchdog_loop, daemon=True).start()
+
+    try:
+        import web_app
+
+        def _make_web_instance(conn):
+            return RemoteAppInstance(conn=conn)
+
+        def _missions_html():
+            try:
+                with open(MISSIONS_LOG_FILE, "r", encoding="utf-8") as f:
+                    lignes = f.readlines()[-30:][::-1]
+                if not lignes:
+                    return ""
+                return "<div style='font-size:12px;line-height:1.7'>" + "<br>".join(
+                    l.strip().replace("<", "&lt;") for l in lignes
+                ) + "</div>"
+            except Exception:
+                return ""
+
+        web_app.start_server(
+            start_task=lambda t, inst, on_complete=None: start_agent_task(t, inst, on_complete=on_complete, use_mistral=True),
+            make_instance=_make_web_instance,
+            load_credentials=load_credentials,
+            save_credentials=save_credentials,
+            load_trusted_senders=load_trusted_senders,
+            save_trusted_senders=save_trusted_senders,
+            has_mistral_fn=get_mistral_api_key,
+            has_openrouter_fn=lambda: bool(load_credentials().get("extra_api_key") or engine_terra.load_api_key()),
+            queue_len_fn=lambda: len(MAIL_WATCHER.queue),
+            missions_html_fn=_missions_html,
+        )
+    except Exception as e:
+        print(f"[WebApp] ⚠️ Interface web non disponible : {e}")
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
