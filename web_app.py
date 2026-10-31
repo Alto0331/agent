@@ -512,10 +512,11 @@ def start_server(start_task, make_instance, load_credentials, save_credentials,
         "on_web_complete": on_web_complete,
     }
     try:
-        ensure_pin(load_credentials, save_credentials)
+        pin = ensure_pin(load_credentials, save_credentials)
         open_firewall_port(WEB_PORT)
         server = WebServer(("0.0.0.0", WEB_PORT), Handler)
         print(f"[WebApp] 🌐 Interface web mobile active sur le port {WEB_PORT} (accès local/VPN).")
+        print(f"[WebApp] 🔑 PIN d'accès actuel : {pin} (modifiable dans l'app web, Réglages, ou --reset-pin pour le régénérer)")
         threading.Thread(target=server.serve_forever, daemon=True).start()
     except Exception as e:
         print(f"[WebApp] ⚠️ Interface web non démarrée : {e}")

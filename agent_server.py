@@ -34,6 +34,15 @@ TRUSTED_SENDERS_FILE = os.path.join(BASE_DIR, "trusted_senders.enc")
 MISSIONS_LOG_FILE = os.path.join(BASE_DIR, "missions.log")
 
 
+def reset_web_pin():
+    """Régénère le PIN d'accès à l'interface web (commande: python agent_server.py --reset-pin)."""
+    import secrets as _secrets
+    new_pin = str(_secrets.randbelow(900000) + 100000)
+    save_credentials({"web_pin": new_pin})
+    print(f"\n[WebApp] 🔑 Nouveau PIN d'accès : {new_pin}\n")
+    return new_pin
+
+
 def _dpapi_available() -> bool:
     try:
         import ctypes
@@ -1916,6 +1925,10 @@ def get_real_local_ip():
 
 
 if __name__ == "__main__":
+    if "--reset-pin" in sys.argv:
+        reset_web_pin()
+        sys.exit(0)
+
     local_ip = get_real_local_ip()
     port = 65432
 
