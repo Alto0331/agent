@@ -88,12 +88,22 @@ def get_pin_hash(creds: dict) -> str:
 
 
 def ensure_pin(creds_fn, save_fn) -> str:
-    """Génère un PIN 6 chiffres au premier lancement et le sauvegarde."""
+    """Génère un PIN 6 chiffres au premier lancement et le sauvegarde.
+    Vérifie la persistance : si la sauvegarde échoue, retente puis alerte clairement."""
     creds = creds_fn()
     if not (creds.get("web_pin") or "").strip():
         pin = str(secrets.randbelow(900000) + 100000)
         save_fn({"web_pin": pin})
-        print(f"[WebApp] 🔑 PIN d'accès initial généré : {pin} (modifiable dans les Réglages)")
+        # Vérifie que le PIN est réellement persisté avant de l'annoncer
+        reloaded = creds_fn()
+        if (reloaded.get("web_pin") or "").strip() != pin:
+            save_fn({"web_pin": pin})
+            reloaded = creds_fn()
+        if (reloaded.get("web_pin") or "").strip() == pin:
+            print(f"[WebApp] 🔑 PIN d'accès initial généré : {pin} (modifiable dans les Réglages)")
+            return pin
+        print("[WebApp] ⚠️ ERREUR : le PIN n'a pas pu être sauvegardé dans credentials.json !")
+        print(f"[WebApp] ⚠️ PIN temporaire pour cette session uniquement : {pin}")
         return pin
     return creds.get("web_pin", "").strip()
 
@@ -413,8 +423,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if u.path == "/api/login":
             creds = HUB.hooks["load_credentials"]()
-            if hashlib.sha256(str(data.get("pin", "")).strip().encode()).hexdigest() == get_pin_hash(creds):
+            supplied = hashlib.sha256(str(data.get("pin", "")).strip().encode()).hexdigest()
+            if supplied == get_pin_hash(creds):
                 return self._json({"ok": True, "token": HUB.new_token()})
+            print(f"[WebApp] ⚠️ Tentative de login échouée (PIN incorrect). PIN en base : {'défini' if (creds.get('web_pin') or '').strip() else 'ABSENT'}")
             return self._json({"ok": False}, 403)
 
         if not self._auth_ok():

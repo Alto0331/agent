@@ -421,8 +421,11 @@ def save_credentials(data: dict) -> dict:
     if "terra_mail_app_password" in current and isinstance(current["terra_mail_app_password"], str):
         current["terra_mail_app_password"] = current["terra_mail_app_password"].replace(" ", "").strip()
     for field in SENSITIVE_FIELDS:
-        if field in current and isinstance(current[field], str) and current[field]:
-            current[field] = dpapi_encrypt(current[field])
+        if field in current and isinstance(current[field], str) and current[field] and not current[field].startswith("dpapi:"):
+            try:
+                current[field] = dpapi_encrypt(current[field])
+            except Exception as enc_err:
+                print(f"[Avertissement] Chiffrement DPAPI impossible pour {field} ({enc_err}) ; valeur conservée telle quelle.")
     try:
         with open(CREDENTIALS_FILE, "w", encoding="utf-8") as f:
             json.dump(current, f, indent=2, ensure_ascii=False)
