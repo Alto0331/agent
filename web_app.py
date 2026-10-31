@@ -299,10 +299,18 @@ const api=(path,data)=>fetch('/api/'+path,{method:data?'POST':'GET',
   headers:{'Content-Type':'application/json','X-Auth':TOKEN},
   body:data?JSON.stringify(data):undefined}).then(r=>r.json());
 async function login(){
-  const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({pin:$('pin').value})}).then(r=>r.json());
-  if(r.ok){TOKEN=r.token;saveTok(TOKEN);location.reload();}
-  else{$('loginErr').textContent='PIN incorrect';}}
+  const btn=document.querySelector('#login .btn');
+  btn.disabled=true;btn.textContent='Connexion...';
+  try{
+    const resp=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({pin:$('pin').value})});
+    const r=await resp.json();
+    if(r.ok){TOKEN=r.token;saveTok(TOKEN);$('loginErr').textContent='';btn.textContent='Connecté ! Redirection...';location.reload();}
+    else{$('loginErr').textContent='PIN incorrect';}
+  }catch(e){
+    $('loginErr').textContent='Erreur réseau : '+(e.message||e)+' — vérifie la connexion à la VM';
+  }
+  btn.disabled=false;btn.textContent='Se connecter';}
 $('pin').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
 async function sendMission(){
   const m=$('mission').value.trim();if(!m)return;
@@ -345,8 +353,7 @@ async function loadSettings(){
   $('engineState').textContent='Mode actuel : '+(s.engine_mode||'terra')+(s.use_ollama?' (Ollama)':'');
   const box=$('senders');box.innerHTML='';
   for(const em of s.trusted_senders){
-    const p=document.createElement('span');p.className='pill';
-    p.innerHTML=em+' <button onclick="rmSender(\''+em+'\')">✕</button>';box.appendChild(p);}}
+    const p=document.createElement('span');p.className='pill';p.textContent=em+' ';const b=document.createElement('button');b.textContent='\u2715';b.onclick=()=>rmSender(em);p.appendChild(b);box.appendChild(p);}}
 $('set-engine').addEventListener('change',()=>{$('ollamaBox').style.display=$('set-engine').value==='local'?'block':'none';});
 async function saveAll(){
   const payload={engine_mode:$('set-engine').value,
@@ -407,6 +414,9 @@ class Handler(BaseHTTPRequestHandler):
             body = PAGE.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store, max-age=0")
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
