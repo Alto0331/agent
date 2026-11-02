@@ -280,7 +280,7 @@ La capture d'écran que tu reçois fait exactement {VISION_TARGET_WIDTH}x{VISION
 🔴 RÈGLE D'OR DE SILENCE ET DE RENTABILITÉ :
 - Tu es un automate d'exécution directe, PAS un chatbot bavard.
 - N'écris AUCUNE phrase d'explication avant ou après tes appels d'outils.
-- Appelle directement l'outil requis. Si plusieurs actions simples sont évidentes, exécute l'action prioritaire immédiatement.
+- Appelle directement l'outil requis. Si plusieurs actions simples et sûres s'enchaînent (remplir un formulaire champ par champ, série de clics, saisie suivie d'un raccourci), regroupe-les dans UN SEUL appel `batch_actions` : toute la séquence s'exécute d'un seul coup, sans attendre de nouvelle capture d'écran entre chaque action.
 - Si une page web ou une application charge, n'attends jamais plus de 3 secondes (`wait` avec `seconds: 3`).
 
 🟢 QUALITÉ DU TEXTE, ORTHOGRAPHE ET MISE EN PAGE (WORD, EXCEL, BRAVE, BLOC-NOTES) :
@@ -685,6 +685,21 @@ TOOLS_SCHEMA = [
                     "seconds": {"type": "number", "default": 3.0, "description": "Durée en secondes (max 3s)."},
                 },
                 "required": ["seconds"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "batch_actions",
+            "description": "Enchaîne PLUSIEURS actions d'un seul coup, sans nouvelle capture d'écran entre chaque : clics, doubles clics, clics droits, saisies, raccourcis, scrolls, drag... Idéal pour remplir un formulaire ou exécuter une série de clics sûrs en UNE SEULE étape. Chaque élément = un objet {\"name\": \"click_xy\", \"x\": 100, \"y\": 200} (la clé \"action\" est aussi acceptée à la place de \"name\"). Interdit dans un batch : batch_actions, ask_human, finish_task.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "actions": {"type": "array", "description": "Liste ordonnée d'actions à exécuter en séquence, ex: [{\"name\":\"click_xy\",\"x\":100,\"y\":200},{\"name\":\"type_text\",\"text\":\"Bonjour\"},{\"name\":\"hotkey\",\"keys\":[\"ctrl\",\"s\"]}]", "items": {"type": "object"}},
+                    "pause": {"type": "number", "default": 0.15, "description": "Pause en secondes entre chaque action (0 à 1s)."},
+                },
+                "required": ["actions"],
             },
         },
     },
@@ -1292,6 +1307,36 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
             secs = min(3.0, max(0.2, float(args.get("seconds", 3.0))))
             time.sleep(secs)
             return f"Attente de {secs:.1f}s terminée."
+
+        elif name == "batch_actions":
+            raw_actions = args.get("actions", [])
+            if not isinstance(raw_actions, list) or not raw_actions:
+                return "Paramètre 'actions' manquant ou vide (liste d'actions requise)."
+            try:
+                pause = max(0.0, min(1.0, float(args.get("pause", 0.15))))
+            except Exception:
+                pause = 0.15
+            results = []
+            for i, act in enumerate(raw_actions[:30], start=1):
+                if app_instance and getattr(app_instance, "stop_requested", False):
+                    results.append(f"{i}. INTERROMPU par l'utilisateur.")
+                    break
+                if not isinstance(act, dict):
+                    results.append(f"{i}. ignorée (format invalide, objet attendu)")
+                    continue
+                sub_name = str(act.get("name") or act.get("action") or "").strip()
+                if not sub_name:
+                    results.append(f"{i}. ignorée (nom d'action manquant)")
+                    continue
+                if sub_name in ("batch_actions", "ask_human", "finish_task"):
+                    results.append(f"{i}. '{sub_name}' interdit dans un batch.")
+                    continue
+                sub_args = {k: v for k, v in act.items() if k not in ("name", "action")}
+                sub_result = execute_action(sub_name, sub_args, app_instance=app_instance)
+                results.append(f"{i}. {sub_name} -> {sub_result}")
+                if pause > 0 and i < len(raw_actions):
+                    time.sleep(pause)
+            return f"Batch de {len(results)} action(s) exécuté(s) :\n" + "\n".join(results)
 
         else:
             return f"Outil inconnu : {name}"
