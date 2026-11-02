@@ -63,6 +63,17 @@ TERRA_MODEL_FALLBACK = "openai/gpt-6.1-terra"
 # Résolution envoyée au modèle Vision (optimisée pour le ratio précision/tokens de GPT-6.1 Terra)
 VISION_TARGET_WIDTH = 1280
 VISION_TARGET_HEIGHT = 720
+
+# Zoom actif sur une zone (x, y, w, h) dans le repère 1280x720 ; None = plein écran
+_ZOOM_BOX = None
+# Notes persistantes réinjectées dans l'historique à chaque étape (état du jeu, etc.)
+_MEMOS: list[str] = []
+# Références de mission (résultats de recherches web, texte de pages lues via Ctrl+A/Ctrl+C)
+# conservées et réinjectées à chaque étape, avec cap de caractères pour limiter les tokens
+_REFS: list[str] = []
+_REFS_MAX_CHARS = 8000
+# Dernière capture envoyée au modèle (base64) — réutilisée par deep_think
+_LAST_FRAME = None
 JPEG_QUALITY = 78
 
 
@@ -212,7 +223,7 @@ def get_screen_size():
     return pyautogui.size()
 
 
-def capture_screen(draw_cursor: bool = True):
+def capture_screen(draw_cursor: bool = True, zoom_box=None):
     """
     Capture l'écran de la VM, dessine un repère visuel sur la position actuelle
     de la souris pour aider GPT-6.1 Terra, et redimensionne en 1280x720.
@@ -236,20 +247,72 @@ def capture_screen(draw_cursor: bool = True):
         except Exception:
             pass
 
-    # Empreinte rapide pour détecter si l'écran est figé (boucle d'actions)
-    small_hash_img = img.resize((64, 36), Image.Resampling.BILINEAR)
-    screen_hash = hashlib.md5(small_hash_img.tobytes()).hexdigest()
-
     # Redimensionnement optimal pour GPT-6.1 Terra Vision
     if (real_w, real_h) != (VISION_TARGET_WIDTH, VISION_TARGET_HEIGHT):
         img_resized = img.resize((VISION_TARGET_WIDTH, VISION_TARGET_HEIGHT), Image.Resampling.LANCZOS)
     else:
         img_resized = img
 
+    # ZOOM éventuel sur une zone (repère 1280x720) : crop agrandi en plein écran
+    if zoom_box is not None:
+        zx, zy, zw, zh = zoom_box
+        zx = max(0, min(VISION_TARGET_WIDTH - 20, int(zx)))
+        zy = max(0, min(VISION_TARGET_HEIGHT - 20, int(zy)))
+        zw = max(20, min(VISION_TARGET_WIDTH - zx, int(zw)))
+        zh = max(20, min(VISION_TARGET_HEIGHT - zy, int(zh)))
+        img_final = img_resized.crop((zx, zy, zx + zw, zy + zh)).resize(
+            (VISION_TARGET_WIDTH, VISION_TARGET_HEIGHT), Image.Resampling.LANCZOS
+        )
+    else:
+        img_final = img_resized
+
+    # Empreinte rapide pour détecter si l'écran est figé (boucle d'actions)
+    small_hash_img = img_final.resize((64, 36), Image.Resampling.BILINEAR)
+    screen_hash = hashlib.md5(small_hash_img.tobytes()).hexdigest()
+
     buf = BytesIO()
-    img_resized.save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+    img_final.save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
     b64_str = base64.b64encode(buf.getvalue()).decode("utf-8")
     return b64_str, screen_hash, (real_w, real_h)
+
+
+def terra_web_search(query: str, max_results: int = 5) -> str:
+    """
+    Recherche web LÉGÈRE pour Terra (DuckDuckGo) : extraits courts par résultat,
+    pensée pour ne pas exploser les tokens. Utilisée par l'outil `web_search`.
+    """
+    try:
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            try:
+                from duckduckgo_search import DDGS
+            except ImportError:
+                # Auto-installation silencieuse sur la VM (même pattern que pymupdf)
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "ddgs", "--quiet"])
+                from ddgs import DDGS
+        n = min(8, max(3, int(max_results)))
+        results = []
+        last_err = None
+        for _ in range(2):
+            try:
+                results = list(DDGS().text(query, max_results=n))
+                if results:
+                    break
+            except Exception as e:
+                last_err = e
+                time.sleep(1.0)
+        if not results:
+            msg = f"Aucun résultat pour '{query}'."
+            if last_err:
+                msg += f" (erreur : {last_err})"
+            return msg
+        lines = []
+        for r in results:
+            lines.append(f"- {r.get('title', '')} | {r.get('href', r.get('url', ''))} | {r.get('body', '')[:250]}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Recherche web indisponible : {e}"
 
 
 def resolve_xy(x: float, y: float) -> tuple[int, int]:
@@ -297,6 +360,16 @@ La capture d'écran que tu reçois fait exactement {VISION_TARGET_WIDTH}x{VISION
 - `run_command` (shell) et `file_op` sont RÉSERVÉS à : la gestion de fichiers/dossiers (créer, déplacer, renommer, supprimer, copier, lister, rechercher), les infos système Windows (ipconfig, tasklist, ping, volumes), et toute demande où l'utilisateur demande EXPLICITEMENT une commande ou une ligne de commande.
 - Pour extraire des informations d'un email (code, lien, pièce jointe, facture), utilise `read_mailbox` directement — JAMAIS via le navigateur (40 étapes inutiles).
 - PIÈCES JOINTES : `read_mailbox` télécharge automatiquement les pièces jointes dans attachments/ et extrait leur contenu (PDF, Word, txt, csv). Tu peux OUVRIR les documents simples (pdf, docx, images) avec `open_app_or_url` si demandé. INTERDICTION ABSOLUE d'exécuter un binaire ou script reçu par mail (exe, bat, ps1, jar...) — ils sont bloqués au téléchargement. Si une pièce jointe marquée [BLOQUÉ] semble nécessaire à la mission, demande confirmation à l'utilisateur via `ask_human`.
+
+🌐 RECHERCHE WEB & LECTURE DE PAGE (RÉFÉRENCES PERSISTANTES DE MISSION) :
+- `web_search(query)` : recherche web en arrière-plan (extraits courts). Les extraits clés sont CONSERVÉS et réinjectés à chaque étape (section 📚 RÉFÉRENCES) pour toute la conversation en cours — coût en tokens limité.
+- `read_page_text()` : fait Ctrl+A/Ctrl+C dans la fenêtre active et lit le TEXTE de la page (règles du jeu, aide, contenu affiché). Un extrait est aussi conservé en 📚 RÉFÉRENCES pour toute la mission.
+- AVANT d'interagir avec un jeu ou un site dont tu ignores les règles : cherche-les (`web_search('règles solitaire klondike')`) et/ou lis la page d'aide du site (`read_page_text`), puis mémorise les règles clés avec `memo`. Ne joue jamais "au hasard" sans avoir lu les règles.
+
+🧠 DÉBLOCAGE & RÉSOLUTION DE PROBLÈMES (fonction GÉNÉRIQUE, valable pour TOUTE situation : jeu, site, appli, erreur répétée) :
+- Dès que tu bloques, que tu répètes une erreur, ou que tu ne comprends pas ce qui est à l'écran : appelle `deep_think(question=...)` avec une question PRÉCISE (ex: 'Quelles sont les règles exactes de ce que je vois ?', 'Pourquoi mon dernier coup n'a pas marché ?', 'Quelle est la meilleure stratégie maintenant ?', 'Quelles étapes concrètes suivre dans l'ordre ?'). Le raisonnement renforcé voit ta capture actuelle ; sa réponse est conservée en 📚 RÉFÉRENCES pour toute la mission.
+- Combine avec `web_search` (infos/règles externes) et `read_page_text` (texte de la page affichée, ex: page d'aide) : `deep_think` pour raisonner, `web_search` / `read_page_text` pour aller chercher l'information manquante, `memo` pour retenir l'état courant.
+- AUTO-CORRECTION : si une action n'a pas eu l'effet attendu (la capture suivante montre la même chose), ne recommence PAS au même pixel : vise le CENTRE de la cible, zoome (`zoom_region`) si la lecture est incertaine, décale légèrement, ou demande-toi la raison via `deep_think` avant de réessayer.
 
 🟣 RÈGLES D'ÉDITION DE FICHIERS PDF (PYMUPDF / FITZ) :
 - N'ouvre JAMAIS un fichier PDF dans Google Docs ou Word pour le modifier (cela détruit la mise en page).
@@ -706,6 +779,80 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "zoom_region",
+            "description": f"Active un ZOOM sur une zone de l'écran : la PROCHAINE capture d'écran sera un agrandissement plein écran de cette zone (coordonnées dans le repère {VISION_TARGET_WIDTH}x{VISION_TARGET_HEIGHT}). Indispensable pour lire précisément de petits éléments (cartes, petites polices, icônes). Passe w=0 ou h=0 pour revenir en plein écran. Tant que le zoom est actif, toutes tes coordonnées (x, y) s'entendent DANS la zone zoomée.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": f"Coin supérieur gauche X de la zone (0 à {VISION_TARGET_WIDTH})."},
+                    "y": {"type": "integer", "description": f"Coin supérieur gauche Y de la zone (0 à {VISION_TARGET_HEIGHT})."},
+                    "w": {"type": "integer", "description": f"Largeur de la zone en pixels du repère (0 = désactive le zoom)."},
+                    "h": {"type": "integer", "description": f"Hauteur de la zone en pixels du repère (0 = désactive le zoom)."},
+                },
+                "required": ["x", "y", "w", "h"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memo",
+            "description": "Enregistre une NOTE PERSISTANTE (état du plateau, carte lue, stratégie prévue...) qui sera réinjectée dans ton historique à CHAQUE étape suivante. Utilise-le pour mémoriser l'état d'un jeu (ex: 'colonne 3 : 9♥ sur 10♠, 2 cartes cachées ; fondation cœur jusqu'au 5') au lieu de tout relire à chaque capture.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Contenu de la note à mémoriser (max 500 caractères)."},
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Recherche web EN ARRIÈRE-PLAN (DuckDuckGo, extraits courts) : règles d'un jeu, aide d'un site, documentation... Les extraits clés sont CONSERVÉS en mémoire de mission et réinjectés à chaque étape suivante (référence persistante, coût en tokens limité). Cherche les règles AVANT d'agir sur quelque chose d'inconnu.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Requête de recherche, ex: 'règles solitaire klondike français', 'comment gagner solitaire Microsoft'."},
+                    "max_results": {"type": "integer", "default": 5, "description": "Nombre de résultats (3 à 8)."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_page_text",
+            "description": "Lit le TEXTE COMPLET de la fenêtre active : fait Ctrl+A puis Ctrl+C et récupère le presse-papiers (page web, aide du jeu, document affiché...). Le texte lu est conservé comme RÉFÉRENCE pour toute la conversation en cours et réinjecté à chaque étape (extrait capé pour limiter les tokens). Indispensable pour lire les règles affichées sur le site du jeu.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "max_chars": {"type": "integer", "default": 8000, "description": "Nombre max de caractères retournés maintenant (500 à 20000). Un extrait est de toute façon conservé en mémoire de mission."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "deep_think",
+            "description": "RÉFLEXION APPROFONDIE GÉNÉRIQUE (déblocage / résolution de problème, pour TOUTE situation) : pose une question précise à un raisonnement renforcé qui voit ta capture actuelle + tes mémos/références (ex: 'Quelles sont les règles exactes de ce que je vois ?', 'Pourquoi mon dernier coup n'a pas marché ?', 'Quelle stratégie adopter maintenant ?', ' Quelles sont les étapes concrètes à suivre ?'). La réponse est conservée en 📚 RÉFÉRENCES pour toute la mission. Utilise-le dès que tu bloques, répètes une erreur ou ne comprends pas une interface.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "Question précise à résoudre (règles, erreur, stratégie, prochaines étapes...)."},
+                },
+                "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "ask_human",
             "description": "Demande de l'aide ou une information manquante à l'utilisateur via la bulle de chat et met l'agent en pause jusqu'à la réponse.",
             "parameters": {
@@ -1077,6 +1224,7 @@ def _handle_edit_pdf(args: dict) -> str:
 
 
 def execute_action(name: str, args: dict, app_instance=None) -> str:
+    global _ZOOM_BOX, _MEMOS, _REFS
     """Exécute l'outil demandé par GPT-6.1 Terra avec mouvement de souris fluide et délais optimisés."""
     if app_instance and getattr(app_instance, "stop_requested", False):
         return "Interrompu par l'utilisateur."
@@ -1338,6 +1486,80 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
                     time.sleep(pause)
             return f"Batch de {len(results)} action(s) exécuté(s) :\n" + "\n".join(results)
 
+        elif name == "zoom_region":
+            try:
+                zx = int(args.get("x", 0))
+                zy = int(args.get("y", 0))
+                zw = int(args.get("w", 0))
+                zh = int(args.get("h", 0))
+            except Exception:
+                return "Coordonnées de zoom invalides."
+            if zw <= 0 or zh <= 0:
+                _ZOOM_BOX = None
+                return "Zoom désactivé : la prochaine capture sera en plein écran."
+            _ZOOM_BOX = (zx, zy, zw, zh)
+            return (f"Zoom activé sur ({zx},{zy}) {zw}x{zh} : la PROCHAINE capture sera agrandie sur cette zone. "
+                    "Désormais, toutes tes coordonnées (x, y) s'entendent DANS cette zone zoomée. "
+                    "Passe w=0 pour revenir en plein écran.")
+
+        elif name == "memo":
+            txt = str(args.get("text", "")).strip()
+            if not txt:
+                return "Mémo vide ignoré."
+            _MEMOS.append(txt[:500])
+            if len(_MEMOS) > 30:
+                _MEMOS.pop(0)
+            return f"Mémo enregistré ({len(_MEMOS)} note(s) en mémoire, réinjectées à chaque étape)."
+
+        elif name == "web_search":
+            q = str(args.get("query", "")).strip()
+            if not q:
+                return "Paramètre 'query' manquant."
+            try:
+                n = int(args.get("max_results", 5))
+            except Exception:
+                n = 5
+            res = terra_web_search(q, n)
+            # Condensé conservé comme référence pour TOUTE la mission (cap pour limiter les tokens)
+            _REFS.append(f"🔎 RECHERCHE '{q}' :\n" + res[:2500])
+            if len(_REFS) > 8:
+                _REFS.pop(0)
+            return res[:8000] + "\n\n(Extraits clés conservés en mémoire de mission : réinjectés automatiquement à chaque étape.)"
+
+        elif name == "read_page_text":
+            try:
+                max_chars = max(500, min(20000, int(args.get("max_chars", 8000))))
+            except Exception:
+                max_chars = 8000
+            try:
+                time.sleep(0.15)
+                pyautogui.hotkey("ctrl", "a")
+                time.sleep(0.25)
+                pyautogui.hotkey("ctrl", "c")
+                time.sleep(0.4)
+                txt = pyperclip.paste() or ""
+            except Exception as e:
+                return f"Lecture du texte impossible : {e}"
+            txt = txt.replace("\r\n", "\n").replace("\r", "\n").strip()
+            if not txt:
+                return ("Presse-papiers vide après Ctrl+A/Ctrl+C : la fenêtre n'a probablement pas le focus. "
+                        "Clique d'abord dans la page, puis réessaie.")
+            _REFS.append(f"📄 TEXTE DE LA PAGE lu via Ctrl+A/Ctrl+C ({len(txt)} car.) :\n" + txt[:6000])
+            if len(_REFS) > 8:
+                _REFS.pop(0)
+            return (txt[:max_chars]
+                    + f"\n\n({len(txt)} caractères lus au total ; un extrait est conservé en mémoire de mission pour toute la conversation.)")
+
+        elif name == "deep_think":
+            q = str(args.get("question", "")).strip()
+            if not q:
+                return "Paramètre 'question' manquant."
+            ans = terra_deep_think(q)
+            _REFS.append(f"🧠 RÉFLEXION '{q[:120]}' :\n" + ans[:3000])
+            if len(_REFS) > 8:
+                _REFS.pop(0)
+            return ans[:6000] + "\n\n(Réflexion conservée en mémoire de mission : réinjectée à chaque étape.)"
+
         else:
             return f"Outil inconnu : {name}"
 
@@ -1348,6 +1570,61 @@ def execute_action(name: str, args: dict, app_instance=None) -> str:
 # ==============================================================================
 # 6. APPEL API OPENROUTER TAILLE SUR MESURE POUR GPT-6.1 TERRA (FLEX 3s -> STANDARD)
 # ==============================================================================
+def terra_deep_think(question: str) -> str:
+    """
+    Appel RÉFLEXIF dédié et GÉNÉRIQUE : envoie la dernière capture + le contexte de mission
+    (mémos, références) + la question de l'agent à un raisonnement renforcé (effort medium),
+    SANS outils. Sert à se débloquer sur N'IMPORTE quelle situation : règles d'un jeu ou d'un
+    site, analyse d'une erreur, stratégie, prochaine action... Appel ponctuel (coût limité).
+    """
+    q = (question or "").strip()
+    if not q:
+        return "Question vide."
+    try:
+        client = get_openrouter_client()
+    except Exception as e:
+        return f"deep_think indisponible (pas de client API) : {e}"
+    sys_txt = (
+        "Tu es le conseiller expert d'un agent visuel autonome sur Windows. "
+        "On te donne sa capture d'écran actuelle, ses mémos et ses références déjà collectées, et sa question. "
+        "Réponds de façon FACTUELLE et ACTIONNABLE : règles exactes de ce qui est à l'écran, analyse de ce qui "
+        "a raté, étapes concrètes à suivre dans l'ordre, zones/coordonnées à viser si pertinent. "
+        "Concis : max ~300 mots, zéro bavardage."
+    )
+    msgs = [{"role": "system", "content": sys_txt}]
+    ctx_parts = []
+    if _MEMOS:
+        ctx_parts.append("Mémos de l'agent :\n" + "\n".join(_MEMOS[-8:]))
+    if _REFS:
+        ctx_parts.append("Références déjà collectées :\n" + "\n\n".join(_REFS[-4:])[:3000])
+    if ctx_parts:
+        msgs.append({"role": "user", "content": "\n\n".join(ctx_parts)})
+    content = [{"type": "text", "text": f"QUESTION DE L'AGENT : {q}"}]
+    if _LAST_FRAME:
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_LAST_FRAME}", "detail": "high"}})
+    msgs.append({"role": "user", "content": content})
+    extra = {
+        "reasoning": {"effort": "medium"},
+        "provider": {"allow_fallbacks": True},
+    }
+    try:
+        resp = client.with_options(max_retries=2, timeout=60.0).chat.completions.create(
+            model=TERRA_MODEL_FALLBACK,
+            messages=msgs,
+            temperature=0.2,
+            max_tokens=900,
+            extra_body=extra,
+        )
+        msg = resp.choices[0].message if resp and getattr(resp, "choices", None) else None
+        txt = (msg.content or "").strip() if msg else ""
+        reasoning = getattr(msg, "reasoning", None) if msg else None
+        if reasoning:
+            txt = f"[raisonnement] {str(reasoning)[:1500]}\n\n{txt}"
+        return txt or "(réponse vide)"
+    except Exception as e:
+        return f"Erreur deep_think : {e}"
+
+
 def call_terra_model(client: OpenAI, messages: list):
     """
     Tente toujours `openai/gpt-6.1-terra:floor` (Flex) en premier avec un coupe-circuit strict à 3 secondes.
@@ -1395,6 +1672,11 @@ def call_terra_model(client: OpenAI, messages: list):
 # 7. BOUCLE PRINCIPALE DE L'AGENT (run_agent)
 # ==============================================================================
 def run_agent(task: str, app_instance=None, max_steps: int = 45):
+    global _ZOOM_BOX, _MEMOS, _REFS, _LAST_FRAME
+    _ZOOM_BOX = None
+    _MEMOS.clear()
+    _REFS.clear()
+    _LAST_FRAME = None
     """
     Boucle principale appelée par agent_server.py.
     Conserve un préfixe de messages 100% statique pour activer le Cache Read d'OpenAI ($0.025/M)
@@ -1451,7 +1733,8 @@ def run_agent(task: str, app_instance=None, max_steps: int = 45):
             return
 
         # 1. Capture de l'écran actuel
-        b64_img, current_hash, _ = capture_screen(draw_cursor=True)
+        b64_img, current_hash, _ = capture_screen(draw_cursor=True, zoom_box=_ZOOM_BOX)
+        _LAST_FRAME = b64_img
 
         if last_screen_hash and current_hash == last_screen_hash:
             unchanged_screen_count += 1
@@ -1472,9 +1755,18 @@ def run_agent(task: str, app_instance=None, max_steps: int = 45):
         # 2. Construction des messages avec préfixe statique (Cache Hit maximal)
         messages = list(static_prefix)
 
-        if history_logs:
-            compact_history = "Historique des actions déjà effectuées :\n" + "\n".join(history_logs[-15:])
-            messages.append({"role": "assistant", "content": compact_history})
+        if history_logs or _MEMOS or _REFS:
+            hist_parts = []
+            if history_logs:
+                hist_parts.append("Historique des actions déjà effectuées :\n" + "\n".join(history_logs[-15:]))
+            if _MEMOS:
+                hist_parts.append("📝 MÉMOS / état mémorisé :\n" + "\n".join(_MEMOS[-12:]))
+            if _REFS:
+                refs_txt = "\n\n".join(_REFS[-6:])
+                if len(refs_txt) > _REFS_MAX_CHARS:
+                    refs_txt = refs_txt[-_REFS_MAX_CHARS:]
+                hist_parts.append("📚 RÉFÉRENCES de la mission (recherches web / pages lues, conservées pour toute la conversation) :\n" + refs_txt)
+            messages.append({"role": "assistant", "content": "\n\n".join(hist_parts)})
 
         # Ajout de la capture précédente (si disponible) pour donner le contexte visuel N-1
         if recent_frames:
@@ -1496,7 +1788,7 @@ def run_agent(task: str, app_instance=None, max_steps: int = 45):
                 "content": [
                     {
                         "type": "text",
-                        "text": f"Capture actuelle (Étape {step}/{max_steps}). Quelle est ta prochaine action ?{loop_warning}",
+                        "text": f"Capture actuelle (Étape {step}/{max_steps})" + (f" [ZOOM actif zone {_ZOOM_BOX} du repère plein écran : tes coordonnées s'entendent DANS la zone]" if _ZOOM_BOX else "") + f". Quelle est ta prochaine action ?{loop_warning}",
                     },
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}", "detail": "high"}},
                 ],
