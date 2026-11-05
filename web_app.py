@@ -317,7 +317,7 @@ label{font-size:11.5px;color:var(--mut);display:block;margin:9px 0 2px;font-weig
 <div id="login"><div class="box">
   <div class="logo">🤖</div>
   <h1>Agent VM</h1>
-  <p class="mut" style="margin-bottom:10px">Interface v3.7</p>
+  <p class="mut" style="margin-bottom:10px">Interface v3.8</p>
   <input id="pin" class="txt" type="password" inputmode="numeric" placeholder="PIN à 6 chiffres" autofocus>
   <button class="btn" onclick="login()">Se connecter</button>
   <p class="mut" id="loginErr" style="color:var(--err);margin-top:10px"></p>
