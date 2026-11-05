@@ -282,6 +282,25 @@ label{font-size:11.5px;color:var(--mut);display:block;margin:9px 0 2px;font-weig
 #login .logo{font-size:46px;margin-bottom:6px}
 #login h1{font-size:17px;margin-bottom:16px}
 #login input{margin-bottom:10px}
+.pxgauge{background:var(--bg);border-radius:6px;height:8px;overflow:hidden;margin-top:4px}
+.pxgauge>div{height:100%;border-radius:6px;transition:width .3s}
+.pxnode{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:11px;margin-bottom:8px}
+.pxnode .name{font-weight:700;font-size:13.5px;display:flex;align-items:center;gap:7px}
+.pxstat{font-size:11px;color:var(--mut);margin-top:7px;display:flex;justify-content:space-between}
+.pxtable{width:100%;border-collapse:collapse;font-size:12px}
+.pxtable th{text-align:left;color:var(--mut);font-weight:600;padding:6px;border-bottom:1px solid var(--line);font-size:11px;text-transform:uppercase}
+.pxtable td{padding:6px;border-bottom:1px solid rgba(255,255,255,.05)}
+.badge{padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:700}
+.badge.run{background:rgba(16,185,129,.15);color:#10b981}
+.badge.stop{background:rgba(239,68,68,.15);color:#ef4444}
+.badge.crit{background:rgba(239,68,68,.2);color:#ef4444}
+.badge.alert{background:rgba(245,158,11,.15);color:#f59e0b}
+.pxissue{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:9px;padding:10px;margin-bottom:8px;font-size:12px}
+.pxissue.crit{border-left-color:var(--err)}
+.pxsum{display:flex;gap:8px;margin-bottom:10px}
+.pxsum .kpi{flex:1;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9px;text-align:center}
+.pxsum .kpi b{display:block;font-size:17px}
+.pxsum .kpi span{font-size:10px;color:var(--mut);text-transform:uppercase}
 #toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--card2);border:1px solid var(--line);color:var(--txt);padding:11px 20px;border-radius:11px;font-size:13.5px;z-index:90;opacity:0;transition:opacity .2s;pointer-events:none;max-width:88vw}
 #toast.show{opacity:1}
 #ctxBar{max-width:820px;margin:0 auto 10px;display:none;background:var(--card);border:1px solid var(--line);border-radius:13px;padding:12px}
@@ -721,6 +740,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "sessions": sessions,
                                "current": HUB.active_session,
                                "title": HUB.sessions.get(HUB.active_session, {}).get("title", "")})
+
+        if u.path == "/api/proxmox_data":
+            try:
+                import proxmox_monitor
+                creds = HUB.hooks["load_credentials"]()
+                return self._json(proxmox_monitor.get_dashboard_data(creds))
+            except Exception as e:
+                return self._json({"ok": False, "error": str(e)})
 
         if u.path == "/api/missions":
             html = HUB.hooks.get("missions_html", lambda: "")()
