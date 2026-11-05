@@ -42,15 +42,15 @@ def _api_request(url: str, token: str, secret: str, method: str = "GET", data=No
         raise ValueError("URL Proxmox non configurée")
     if not base.startswith("http"):
         base = "https://" + base
-    req = urllib.request.Request(base + "/api2/json" + (data.get("path", "") if isinstance(data, dict) else ""),
-                                 method=method)
+    path = data.get("path", "") if isinstance(data, dict) else ""
+    body = json.dumps(data.get("body", {})).encode() if isinstance(data, dict) and data.get("body") else None
+    req = urllib.request.Request(base + "/api2/json" + path, data=body, method=method)
     req.add_header("Authorization", f"PVEAPIToken={token.strip()}={secret.strip()}")
     req.add_header("Content-Type", "application/json")
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE  # certificat auto-signé accepté (réseau local)
-    body = json.dumps(data.get("body", {})).encode() if isinstance(data, dict) and data.get("body") else None
-    with urllib.request.urlopen(req, body=body, context=ctx, timeout=timeout) as resp:
+    with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8")).get("data", {})
 
 
