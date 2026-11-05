@@ -317,6 +317,7 @@ label{font-size:11.5px;color:var(--mut);display:block;margin:9px 0 2px;font-weig
 <div id="login"><div class="box">
   <div class="logo">🤖</div>
   <h1>Agent VM</h1>
+  <p class="mut" style="margin-bottom:10px">Interface v3.6</p>
   <input id="pin" class="txt" type="password" inputmode="numeric" placeholder="PIN à 6 chiffres" autofocus>
   <button class="btn" onclick="login()">Se connecter</button>
   <p class="mut" id="loginErr" style="color:var(--err);margin-top:10px"></p>
@@ -628,12 +629,14 @@ async function saveAll(){
 async function login(){
   const btn=document.querySelector('#login .btn');
   btn.disabled=true;btn.textContent='Connexion…';
-  try{const resp=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({pin:$('pin').value})});
+  try{
+    const resp=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({pin:$('pin').value})});
+    if(!resp.ok&&resp.status!==403){throw new Error('HTTP '+resp.status);}
     const r=await resp.json();
-    if(r.ok){TOKEN=r.token;saveTok(TOKEN);location.reload();}
-    else $('loginErr').textContent='PIN incorrect';
-  }catch(e){$('loginErr').textContent='Erreur réseau : vérifie la connexion à la VM';}
+    if(r.ok){TOKEN=r.token;saveTok(TOKEN);$('loginErr').textContent='';location.reload();}
+    else $('loginErr').textContent='PIN incorrect — le PIN actuel est affiché dans la console du serveur';
+  }catch(e){$('loginErr').textContent='Erreur réseau ('+(e.message||e)+') — VM injoignable : vérifie VPN/WiFi/pare-feu';}
   btn.disabled=false;btn.textContent='Se connecter';}
 $('pin').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
 $('mission').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMission();}});
