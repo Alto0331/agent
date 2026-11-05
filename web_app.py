@@ -243,6 +243,16 @@ header .ttl{font-weight:600;font-size:14.5px;flex:1;white-space:nowrap;overflow:
 #stLbl.wait{color:var(--warn);border-color:var(--warn)}
 #chat{flex:1;overflow-y:auto;padding:18px 16px 8px;scroll-behavior:smooth}
 #logs{max-width:820px;margin:0 auto;font-size:13.5px;line-height:1.65}
+@media(min-width:1000px){
+  #logs{font-size:14.5px;max-width:920px}
+  #inputRow,#inputBar>div,#ctxBar{max-width:920px !important}
+  #sidebar{width:290px}
+  #drawer{width:480px;right:-500px}
+  #drawer.open{right:0}
+  .card{padding:18px}
+  header{padding:13px 22px}
+  main{padding:20px 22px}
+}
 .log-line{padding:7px 2px;border-bottom:1px solid rgba(255,255,255,.04);white-space:pre-wrap;word-wrap:break-word}
 .tag-sys{color:var(--mut)}.tag-agent{color:#7dd3fc}.tag-user{color:#86efac}.tag-error{color:var(--err)}
 .empty{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--mut);gap:8px}
@@ -317,7 +327,7 @@ label{font-size:11.5px;color:var(--mut);display:block;margin:9px 0 2px;font-weig
 <div id="login"><div class="box">
   <div class="logo">🤖</div>
   <h1>Agent VM</h1>
-  <p class="mut" style="margin-bottom:10px">Interface v4.0</p>
+  <p class="mut" style="margin-bottom:10px">Interface v4.1</p>
   <input id="pin" class="txt" type="password" inputmode="numeric" placeholder="PIN à 6 chiffres" autofocus>
   <button class="btn" onclick="this.textContent='CLIC RECU !';login()">Se connecter</button>
   <p class="mut" id="loginErr" style="color:var(--err);margin-top:10px"></p>
@@ -441,8 +451,17 @@ document.addEventListener('DOMContentLoaded',function(){
 </div>
 <div id="toast"></div>
 <script>
-window.onerror=function(msg){try{var el=document.getElementById('loginErr');
-  if(el){el.textContent='Erreur JS : '+msg;el.style.color='#ef4444';}}catch(e){}};
+function showErr(msg){
+  try{
+    var t=document.getElementById('toast');
+    if(t){t.textContent='⚠️ '+msg;t.style.borderColor='#ef4444';
+      t.classList.add('show');setTimeout(function(){t.classList.remove('show');},5000);}
+    var el=document.getElementById('loginErr');
+    if(el&&el.offsetParent!==null){el.textContent='Erreur JS : '+msg;el.style.color='#ef4444';}
+  }catch(e){}}
+window.onerror=function(msg){showErr(msg);return false;};
+window.addEventListener('unhandledrejection',function(e){
+  showErr('Erreur async : '+(e.reason&&e.reason.message?e.reason.message:e.reason));});
 </script>
 <script>
 if(typeof Promise==='undefined'||typeof fetch==='undefined'){
