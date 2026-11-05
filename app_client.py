@@ -266,7 +266,24 @@ class AgentClientApp:
     # 3. MENU PARAMÈTRES COMPLET (COMPTE PRINCIPAL, API/OAUTH, OLLAMA, MAIL TERRA)
     # ==========================================================================
     def _build_settings_panel(self):
-        header = tk.Frame(self.submenu_frame, bg="#1e293b")
+        # --- ZONE DEROULANTE : les réglages ne se coupent plus, quel que soit leur nombre ---
+        self.settings_canvas = tk.Canvas(self.submenu_frame, bg="#1e293b", highlightthickness=0)
+        self.settings_sb = tk.Scrollbar(self.submenu_frame, orient=tk.VERTICAL,
+                                        command=self.settings_canvas.yview, bg="#1f2937",
+                                        troughcolor="#0f172a", bd=0, width=10)
+        self.settings_canvas.configure(yscrollcommand=self.settings_sb.set)
+        self.settings_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.settings_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.settings_inner = tk.Frame(self.settings_canvas, bg="#1e293b")
+        self._settings_canvas_win = self.settings_canvas.create_window((0, 0), window=self.settings_inner, anchor="nw")
+        self.settings_inner.bind("<Configure>", lambda e: self.settings_canvas.configure(
+            scrollregion=self.settings_canvas.bbox("all")))
+        self.settings_canvas.bind("<Configure>", lambda e: self.settings_canvas.itemconfigure(
+            self._settings_canvas_win, width=e.width))
+        self.settings_canvas.bind_all("<MouseWheel>", lambda e: self.settings_canvas.yview_scroll(
+            int(-1 * (e.delta / 120)), "units"))
+
+        header = tk.Frame(self.settings_inner, bg="#1e293b")
         header.pack(fill=tk.X, pady=(0, 4))
 
         tk.Label(
@@ -274,7 +291,7 @@ class AgentClientApp:
             fg="#38bdf8", bg="#1e293b", font=("Segoe UI", 9, "bold")
         ).pack(side=tk.LEFT)
 
-        self.notebook = ttk.Notebook(self.submenu_frame, style="Dark.TNotebook")
+        self.notebook = ttk.Notebook(self.settings_inner, style="Dark.TNotebook")
         self.notebook.pack(fill=tk.X, pady=2)
 
         # --- ONGLET 1 : COMPTE PRINCIPAL (SITES & SESSIONS) ---
@@ -503,16 +520,40 @@ class AgentClientApp:
         tk.Label(tab_superv, text="💡 Token : Proxmox → Datacenter → Permissions → API Tokens (lecture seule suffit pour surveiller).\n📱 Abonne-toi au topic dans l'app ntfy pour recevoir les alertes.",
             fg="#94a3b8", bg="#1e293b", justify=tk.LEFT, font=("Segoe UI", 7)).pack(anchor="w", pady=(4, 0))
 
+        # --- ONGLET 7 : RESEAU (ADRESSE IP ANNONCEE) ---
+        tab_net = tk.Frame(self.notebook, bg="#1e293b", padx=8, pady=8)
+        self.notebook.add(tab_net, text="🌐 Réseau")
+
+        tk.Label(
+            tab_net,
+            text=("💡 Adresse IP que l'agent annonce et utilise pour être joint.\n"
+                  "Mets l'IP Tailscale de la VM (100.x.x.x) pour y accéder depuis ton téléphone\n"
+                  "via le VPN. Laisse vide pour garder la détection automatique.\n"
+                  "L'interface web est joignable sur TOUTES les adresses de la VM,\n"
+                  "quelle que soit la valeur de ce champ."),
+            fg="#94a3b8", bg="#1e293b", justify=tk.LEFT, font=("Segoe UI", 7)
+        ).pack(anchor="w", pady=(0, 6))
+
+        g_net = tk.Frame(tab_net, bg="#1e293b")
+        g_net.pack(fill=tk.X)
+        tk.Label(g_net, text="IP annoncée :", fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8, "bold")).grid(row=0, column=0, sticky="w", pady=3)
+        self.var_announce_ip = tk.StringVar(value=self.config.get("announce_ip", ""))
+        tk.Entry(g_net, textvariable=self.var_announce_ip, bg="#0f172a", fg="white", insertbackground="white", relief=tk.FLAT, font=("Consolas", 9)).grid(row=0, column=1, sticky="ew", padx=6, pady=3, ipady=2)
+        g_net.columnconfigure(1, weight=1)
+
+        tk.Label(tab_net, text="📱 Téléphone : http://<cette IP>:8765 · Console : http://<cette IP>:65432 (app PC)",
+            fg="#94a3b8", bg="#1e293b", justify=tk.LEFT, font=("Segoe UI", 7)).pack(anchor="w", pady=(4, 0))
+
         # --- BOUTON GLOBAL DE SAUVEGARDE & SYNCHRONISATION ---
         tk.Button(
-            self.submenu_frame,
+            self.settings_inner,
             text="💾 Enregistrer tous les paramètres & Synchroniser avec la VM",
             bg="#0284c7", fg="white", bd=0, activebackground="#0369a1", activeforeground="white",
             font=("Segoe UI", 9, "bold"), pady=6, command=self.save_and_sync_credentials
         ).pack(fill=tk.X, pady=(8, 2))
 
         tk.Button(
-            self.submenu_frame,
+            self.settings_inner,
             text="🔄 Vérifier les mises à jour (beta / release) & redémarrer",
             bg="#7c3aed", fg="white", bd=0, activebackground="#6d28d9", activeforeground="white",
             font=("Segoe UI", 8, "bold"), pady=5, command=self.check_for_updates
@@ -544,8 +585,10 @@ class AgentClientApp:
             self.submenu_frame.pack_forget()
             self.submenu_visible = False
             self.btn_submenu.config(bg="#374151")
+            self.root.geometry("450x650")
         else:
-            self.submenu_frame.pack(fill=tk.X, after=self.ip_bar)
+            self.root.geometry("480x780")
+            self.submenu_frame.pack(fill=tk.BOTH, expand=True, after=self.ip_bar)
             self.submenu_visible = True
             self.btn_submenu.config(bg="#0284c7")
 
@@ -572,6 +615,9 @@ class AgentClientApp:
         self.config["ntfy_enabled"] = bool(self.var_ntfy_enabled.get())
         self.config["ntfy_url"] = self.var_ntfy_url.get().strip() or "https://ntfy.sh"
         self.config["ntfy_topic"] = self.var_ntfy_topic.get().strip()
+
+        # 7. Réseau
+        self.config["announce_ip"] = self.var_announce_ip.get().strip()
 
         # 3. Modèle Local Ollama
         self.config["use_ollama"] = bool(self.var_use_ollama.get())

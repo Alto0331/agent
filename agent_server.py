@@ -2009,6 +2009,27 @@ def handle_client(conn, addr):
     conn.close()
 
 
+def get_all_local_ips():
+    """Toutes les adresses IPv4 de la machine (cartes réseau, VMware, Tailscale, etc.)."""
+    ips = []
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip not in ips and not ip.startswith("127."):
+                ips.append(ip)
+    except Exception:
+        pass
+    try:
+        import subprocess as _sp
+        out = _sp.check_output(["ipconfig"], text=True, errors="replace")
+        for m in re.finditer(r"IPv4[^\d]*([\d.]+)", out):
+            if m.group(1) not in ips and not m.group(1).startswith("127."):
+                ips.append(m.group(1))
+    except Exception:
+        pass
+    return ips
+
+
 def get_real_local_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -2026,6 +2047,8 @@ if __name__ == "__main__":
         sys.exit(0)
 
     local_ip = get_real_local_ip()
+    all_ips = get_all_local_ips()
+    announce_ip = (load_credentials().get("announce_ip") or "").strip()
     port = 65432
 
     threading.Thread(target=MAIL_WATCHER.watch_loop, daemon=True).start()
@@ -2063,6 +2086,7 @@ if __name__ == "__main__":
             queue_len_fn=lambda: len(MAIL_WATCHER.queue),
             missions_html_fn=_missions_html,
             proxmox_report_html_fn=lambda: proxmox_monitor.load_last_report().replace("<", "&lt;"),
+            network_ips_fn=get_all_local_ips,
         )
     except Exception as e:
         print(f"[WebApp] ⚠️ Interface web non disponible : {e}")
@@ -2080,6 +2104,12 @@ if __name__ == "__main__":
     print(" 🤖 AGENT SERVEUR PRÊT (Dans la VM)")
     print("=" * 65)
     print(f"👉 ADRESSE IP VM          : {local_ip}")
+    if all_ips:
+        print(f"👉 TOUTES LES ADRESSES    : {', '.join(all_ips)}")
+    if announce_ip:
+        print(f"👉 IP ANNONCÉE (config)   : {announce_ip} — téléphone : http://{announce_ip}:8765 (web) · {announce_ip}:65432 (app PC)")
+    else:
+        print("👉 Interface web joignable sur TOUTES les adresses ci-dessus, port 8765")
     print(f"👉 PORT                   : {port}")
     print(f"🧠 CODEUR MISTRAL         : {mistral_state}")
     print(f"👁️ MOTEURS D'ACTION       : Terra (Défaut) | Lite Claude ({'OUI' if HAS_LITE_ENGINE else 'NON'}) | Ollama")

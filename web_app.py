@@ -293,6 +293,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ntfy_enabled": bool(creds.get("ntfy_enabled")),
                 "ntfy_url": creds.get("ntfy_url", "https://ntfy.sh"),
                 "ntfy_topic": creds.get("ntfy_topic", ""),
+                "announce_ip": creds.get("announce_ip", ""),
             })
 
         if u.path == "/api/sessions":
@@ -303,6 +304,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "sessions": sessions,
                                "current": HUB.active_session,
                                "title": HUB.sessions.get(HUB.active_session, {}).get("title", "")})
+
+        if u.path == "/api/network":
+            creds = HUB.hooks["load_credentials"]()
+            ips = HUB.hooks.get("network_ips_fn", lambda: [])()
+            return self._json({"ok": True,
+                               "host": self.headers.get("Host", ""),
+                               "announce_ip": creds.get("announce_ip", ""),
+                               "ips": ips})
 
         if u.path == "/api/proxmox_data":
             try:
@@ -401,7 +410,7 @@ class Handler(BaseHTTPRequestHandler):
                 "terra_mail_address", "terra_mail_app_password", "terra_authorized_sender",
                 "main_account_email", "main_account_password",
                 "proxmox_enabled", "proxmox_url", "proxmox_token", "proxmox_secret",
-                "ntfy_enabled", "ntfy_url", "ntfy_topic",
+                "ntfy_enabled", "ntfy_url", "ntfy_topic", "announce_ip",
             ]
             payload = {k: v for k, v in data.items() if k in allowed and v != ""}
             try:
@@ -451,7 +460,7 @@ def start_server(start_task, make_instance, load_credentials, save_credentials,
                  load_trusted_senders, save_trusted_senders,
                  has_mistral_fn=None, has_openrouter_fn=None, queue_len_fn=None,
                  missions_html_fn=None, on_web_complete=None, apply_credentials_sync=None,
-                 proxmox_report_html_fn=None):
+                 proxmox_report_html_fn=None, network_ips_fn=None):
     """Lancé par agent_server.py dans un thread daemon."""
     HUB.hooks = {
         "start_task": start_task,
@@ -466,6 +475,7 @@ def start_server(start_task, make_instance, load_credentials, save_credentials,
         "queue_len": queue_len_fn or (lambda: 0),
         "missions_html": missions_html_fn or (lambda: ""),
         "proxmox_report_html": proxmox_report_html_fn or (lambda: ""),
+        "network_ips_fn": network_ips_fn or (lambda: []),
         "on_web_complete": on_web_complete,
     }
     try:

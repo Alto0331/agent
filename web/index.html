@@ -344,6 +344,9 @@ async function openSettings(){
   <label>Serveur ntfy</label><input id="set-ntfy-url" class="txt" placeholder="https://ntfy.sh">
   <label>Topic</label><input id="set-ntfy-topic" class="txt" placeholder="mon-topic-secret-vm">
   <p class="mut" style="margin-top:6px">📱 Abonne-toi au topic dans l'app ntfy pour recevoir les alertes sur ton téléphone.</p>
+  <h2>🌐 Réseau</h2>
+  <label>Adresse IP annoncée (vide = auto)</label><input id="set-announce-ip" class="txt" placeholder="ex : 100.x.x.x (IP Tailscale de la VM)">
+  <div id="netInfo" class="card" style="font-size:12px;line-height:1.7"></div>
   <h2>🔐 PIN</h2>
   <input id="newPin" class="txt" placeholder="Nouveau PIN (6 chiffres)">
   <button class="btn sec" style="margin-top:8px" onclick="changePin()">Changer le PIN</button>
@@ -357,7 +360,17 @@ async function openSettings(){
   $('set-px-token').value=s.proxmox_token||'';
   $('set-ntfy-enabled').checked=s.ntfy_enabled;
   $('set-ntfy-url').value=s.ntfy_url||'https://ntfy.sh';
-  $('set-ntfy-topic').value=s.ntfy_topic||'';}
+  $('set-ntfy-topic').value=s.ntfy_topic||'';
+  $('set-announce-ip').value=s.announce_ip||'';
+  api('network').then(function(n){
+    var box=document.getElementById('netInfo');if(!box)return;box.innerHTML='';
+    var add=function(t,ok){var p=document.createElement('div');if(ok)p.style.color='#10b981';p.textContent=t;box.appendChild(p);};
+    add('Tu acc\u00e8des actuellement via : http://'+(n.host||'?'),true);
+    if(n.ips&&n.ips.length)add('Adresses du serveur : '+n.ips.join(', '));
+    var ip=$('set-announce-ip').value||((n.host||'').split(':')[0]);
+    if(ip)add('T\u00e9l\u00e9phone (VPN) : http://'+ip+':8765');
+    add('L\u2019interface web reste joignable sur TOUTES les adresses du serveur.');
+  }).catch(function(){});}
 async function openProblems(){
   openDrawer('<h2>🖥️ Tableau de bord Proxmox</h2><p class="mut">Chargement…</p>');
   const d=await api('proxmox_data');
@@ -506,7 +519,8 @@ async function saveAll(){
     proxmox_token:$('set-px-token').value,
     ntfy_enabled:$('set-ntfy-enabled').checked,
     ntfy_url:$('set-ntfy-url').value,
-    ntfy_topic:$('set-ntfy-topic').value};
+    ntfy_topic:$('set-ntfy-topic').value,
+    announce_ip:$('set-announce-ip').value};
   const g=id=>$(id).value.trim();
   if(g('set-orkey'))payload.openrouter_key=g('set-orkey');
   if(g('set-mistralkey'))payload.mistral_api_key=g('set-mistralkey');
