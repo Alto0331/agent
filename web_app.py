@@ -422,6 +422,16 @@ async function openSettings(){
   <input id="newSender" class="txt" placeholder="email@ajouter.com">
   <button class="btn sec" style="margin-top:8px" onclick="addSender()">➕ Ajouter</button>
   <div id="senders" style="margin-top:8px">${s.trusted_senders.map(e=>`<span class="pill">${e}<button onclick="rmSender('${e}')">✕</button></span>`).join('')}</div>
+  <h2>🖥️ Proxmox (hyperviseur)</h2>
+  <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="set-px-enabled" style="width:auto"> Surveillance activée (toutes les 15 min)</label>
+  <label>URL du serveur</label><input id="set-px-url" class="txt" placeholder="https://192.168.1.10:8006">
+  <label>Token ID (user@realm!tokenid)</label><input id="set-px-token" class="txt" placeholder="root@pam!agent">
+  <label>Secret du token ${s.has_proxmox_secret?'✅':'❌'}</label><input id="set-px-secret" class="txt" type="password" placeholder="Vide = inchangé">
+  <h2>🔔 ntfy (notifications)</h2>
+  <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="set-ntfy-enabled" style="width:auto"> Notifications si problème</label>
+  <label>Serveur ntfy</label><input id="set-ntfy-url" class="txt" placeholder="https://ntfy.sh">
+  <label>Topic</label><input id="set-ntfy-topic" class="txt" placeholder="mon-topic-secret-vm">
+  <p class="mut" style="margin-top:6px">📱 Abonne-toi au topic dans l'app ntfy pour recevoir les alertes sur ton téléphone.</p>
   <h2>🔐 PIN</h2>
   <input id="newPin" class="txt" placeholder="Nouveau PIN (6 chiffres)">
   <button class="btn sec" style="margin-top:8px" onclick="changePin()">Changer le PIN</button>
@@ -429,13 +439,25 @@ async function openSettings(){
   <button class="btn" onclick="saveAll()">💾 Sauvegarder tout</button>
   <p class="mut ok-err" id="saveMsg"></p>
   <div style="height:20px"></div>`);
-  $('set-engine').onchange=()=>{$('ollamaBox').style.display=$('set-engine').value==='local'?'block':'none';};}
+  $('set-engine').onchange=()=>{$('ollamaBox').style.display=$('set-engine').value==='local'?'block':'none';};
+  $('set-px-enabled').checked=s.proxmox_enabled;
+  $('set-px-url').value=s.proxmox_url||'';
+  $('set-px-token').value=s.proxmox_token||'';
+  $('set-ntfy-enabled').checked=s.ntfy_enabled;
+  $('set-ntfy-url').value=s.ntfy_url||'https://ntfy.sh';
+  $('set-ntfy-topic').value=s.ntfy_topic||'';}
 async function openProblems(){
   const r=await api('missions');
   openDrawer(`<h2>🧭 Missions récentes</h2>
   <div class="card" style="font-size:12px;line-height:1.8">${r.html||'Aucune mission enregistrée.'}</div>
-  <h2>🛠️ Infrastructure</h2>
-  <div class="card"><p class="mut">Surveillance Proxmox/RMM : prochaine étape (V.3.3).</p></div>`);}
+  <h2>🖥️ Infrastructure Proxmox</h2>
+  <div class="card" style="font-size:12px;line-height:1.8;white-space:pre-wrap">${r.proxmox||'Aucun rapport pour l\'instant.'}</div>
+  <button class="btn" onclick="proxmoxCheck()">🔍 Vérifier maintenant</button>`);}
+async function proxmoxCheck(){
+  toast('Vérification Proxmox en cours…');
+  const r=await api('proxmox_check',{});
+  if(r.ok){toast(r.issues_count?r.issues_count+' problème(s) détecté(s)':'Aucun problème ✅');openProblems();}
+  else toast(r.error||'Erreur',false);}
 /* ===== ACTIONS ===== */
 async function engineChange(){
   const r=await api('sync',{engine_mode:$('engineSel').value,use_ollama:$('engineSel').value==='local'});
@@ -478,12 +500,19 @@ async function changePin(){const v=$('newPin').value.trim();
 async function saveAll(){
   const payload={engine_mode:$('set-engine').value,ollama_url:$('set-ollama-url').value,ollama_model:$('set-ollama-model').value,
     terra_mail_address:$('set-terra-mail').value,terra_authorized_sender:$('set-auth-sender').value,main_account_email:$('set-main-mail').value,
-    use_ollama:$('set-engine').value==='local'};
+    use_ollama:$('set-engine').value==='local',
+    proxmox_enabled:$('set-px-enabled').checked,
+    proxmox_url:$('set-px-url').value,
+    proxmox_token:$('set-px-token').value,
+    ntfy_enabled:$('set-ntfy-enabled').checked,
+    ntfy_url:$('set-ntfy-url').value,
+    ntfy_topic:$('set-ntfy-topic').value};
   const g=id=>$(id).value.trim();
   if(g('set-orkey'))payload.openrouter_key=g('set-orkey');
   if(g('set-mistralkey'))payload.mistral_api_key=g('set-mistralkey');
   if(g('set-terra-pwd'))payload.terra_mail_app_password=g('set-terra-pwd');
   if(g('set-main-pwd'))payload.main_account_password=g('set-main-pwd');
+  const pxs=$('set-px-secret').value.trim();if(pxs)payload.proxmox_secret=pxs;
   const r=await api('sync',payload);
   $('saveMsg').textContent=r.ok?'✅ Sauvegardé':'❌ '+(r.error||'Erreur');
   $('saveMsg').style.color=r.ok?'var(--ok)':'var(--err)';
@@ -587,6 +616,13 @@ class Handler(BaseHTTPRequestHandler):
                 "auth_sender": creds.get("terra_authorized_sender", ""),
                 "main_email": creds.get("main_account_email", ""),
                 "trusted_senders": trusted,
+                "proxmox_enabled": bool(creds.get("proxmox_enabled")),
+                "proxmox_url": creds.get("proxmox_url", ""),
+                "proxmox_token": creds.get("proxmox_token", ""),
+                "has_proxmox_secret": bool(creds.get("proxmox_secret")),
+                "ntfy_enabled": bool(creds.get("ntfy_enabled")),
+                "ntfy_url": creds.get("ntfy_url", "https://ntfy.sh"),
+                "ntfy_topic": creds.get("ntfy_topic", ""),
             })
 
         if u.path == "/api/sessions":
@@ -598,9 +634,20 @@ class Handler(BaseHTTPRequestHandler):
                                "current": HUB.active_session,
                                "title": HUB.sessions.get(HUB.active_session, {}).get("title", "")})
 
+        if u.path == "/api/proxmox_check":
+            try:
+                import proxmox_monitor
+                creds = HUB.hooks["load_credentials"]()
+                report, issues = proxmox_monitor.check_and_report(creds, notify_ntfy=True)
+                HUB.append_log("🖥️ [Proxmox — vérification manuelle]\n" + report + "\n", "system")
+                return self._json({"ok": True, "report": report, "issues_count": len(issues)})
+            except Exception as e:
+                return self._json({"ok": False, "error": str(e)})
+
         if u.path == "/api/missions":
             html = HUB.hooks.get("missions_html", lambda: "")()
-            return self._json({"ok": True, "html": html})
+            proxmox_html = HUB.hooks.get("proxmox_report_html", lambda: "")()
+            return self._json({"ok": True, "html": html, "proxmox": proxmox_html})
 
         self._json({"ok": False, "error": "route inconnue"}, 404)
 
@@ -685,6 +732,8 @@ class Handler(BaseHTTPRequestHandler):
                 "openrouter_key", "mistral_api_key",
                 "terra_mail_address", "terra_mail_app_password", "terra_authorized_sender",
                 "main_account_email", "main_account_password",
+                "proxmox_enabled", "proxmox_url", "proxmox_token", "proxmox_secret",
+                "ntfy_enabled", "ntfy_url", "ntfy_topic",
             ]
             payload = {k: v for k, v in data.items() if k in allowed and v != ""}
             try:
@@ -723,7 +772,8 @@ class WebServer(ThreadingHTTPServer):
 def start_server(start_task, make_instance, load_credentials, save_credentials,
                  load_trusted_senders, save_trusted_senders,
                  has_mistral_fn=None, has_openrouter_fn=None, queue_len_fn=None,
-                 missions_html_fn=None, on_web_complete=None, apply_credentials_sync=None):
+                 missions_html_fn=None, on_web_complete=None, apply_credentials_sync=None,
+                 proxmox_report_html_fn=None):
     """Lancé par agent_server.py dans un thread daemon."""
     HUB.hooks = {
         "start_task": start_task,
@@ -737,6 +787,7 @@ def start_server(start_task, make_instance, load_credentials, save_credentials,
         "has_openrouter": has_openrouter_fn or (lambda: False),
         "queue_len": queue_len_fn or (lambda: 0),
         "missions_html": missions_html_fn or (lambda: ""),
+        "proxmox_report_html": proxmox_report_html_fn or (lambda: ""),
         "on_web_complete": on_web_complete,
     }
     try:

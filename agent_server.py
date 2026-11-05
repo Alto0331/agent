@@ -94,7 +94,7 @@ def dpapi_decrypt(token: str) -> str:
 
 SENSITIVE_FIELDS = [
     "terra_mail_app_password", "main_account_password", "extra_api_key",
-    "mistral_api_key", "ollama_api_key",
+    "mistral_api_key", "ollama_api_key", "proxmox_secret",
 ]
 
 
@@ -1063,6 +1063,8 @@ def _watchdog_loop():
 
 
 import agent_hooks
+import proxmox_monitor
+proxmox_monitor.init(BASE_DIR)
 agent_hooks.fetch_mailbox = fetch_mailbox
 
 MAIL_WATCHER = MailWatcher()
@@ -1310,6 +1312,33 @@ BRAIN_TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "proxmox_status",
+            "description": "Vérifie l'état complet de l'hyperviseur Proxmox : tous les nœuds et VMs (état, CPU, RAM, disque), détection des anomalies et rapport détaillé avec solutions proposées. À utiliser quand l'utilisateur demande 'y a-t-il un problème sur les VMs ?' ou pour toute question infrastructure.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "proxmox_vm_action",
+            "description": "Action de contrôle sur une VM Proxmox : start, stop, reboot ou shutdown. ATTENTION : action intrusive — utilise ask_human pour faire valider l'action par l'utilisateur AVANT de l'exécuter (sauf si l'utilisateur l'a déjà explicitement demandée dans sa consigne). Après l'action, re-vérifie avec proxmox_status.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "vmid": {"type": "integer", "description": "ID de la VM (ex: 101)."},
+                    "action": {"type": "string", "enum": ["start", "stop", "reboot", "shutdown"], "description": "Action à exécuter."},
+                },
+                "required": ["vmid", "action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "finish",
             "description": "Termine la mission avec un résumé final complet. À appeler quand la mission est accomplie et validée.",
             "parameters": {
@@ -1487,6 +1516,10 @@ def run_mistral_brain_loop(task: str, app_instance, use_mistral_tandem=True):
         "- N'affirme JAMAIS qu'une vérification a été faite si elle ne l'a pas été (pas de 'testé en simulation', pas de 'vérifié visuellement' sans rapport Terra ou preuve).\n"
         "- Pour toute vérification visuelle, utilise delegate_terra et cite SON rapport.\n"
         "- Les dates : donne la date du jour réelle, pas des dates inventées.\n\n"
+        "INFRASTRUCTURE PROXMOX :\n"
+        "- Pour toute question sur les VMs/l'hyperviseur ('y a-t-il un problème sur les VMs ?'), utilise proxmox_status : il retourne la cartographie complète et les anomalies avec solutions.\n"
+        "- Pour agir sur une VM (redémarrer une VM qui a un problème), utilise ask_human pour valider PUIS proxmox_vm_action, puis re-vérifie avec proxmox_status et confirme factuellement.\n"
+        "- Ne décris jamais un état VM sans l'avoir vérifié via proxmox_status.\n\n"
         "RÈGLES DE VÉRIFICATION VISUELLE EFFICACE :\n"
         "- Chaque delegate_terra de vérification doit porter une CHECKLIST précise (images affichées ? cohérence image-texte ? superpositions ? format téléphone ?) : donne la checklist dans la mission, sinon Terra décrira la page en général et ratera des détails.\n"
         "- Utilise le paramètre focus pour ne pas re-décrire ce qui est déjà validé (ex: 'déjà validé : header ; vérifie uniquement la galerie'). Ne re-valide JAMAIS entièrement une page pour un détail ponctuel.\n"
@@ -1598,6 +1631,19 @@ def run_mistral_brain_loop(task: str, app_instance, use_mistral_tandem=True):
             elif fn == "read_mailbox":
                 result = brain_read_mailbox(fn_args.get("max_mails", 10), fn_args.get("unread_only", False))
 
+            elif fn == "proxmox_status":
+                log_msg("🖥️ Vérification Proxmox en cours...\n", "agent")
+                creds = load_credentials()
+                report, issues = proxmox_monitor.check_and_report(creds, notify_ntfy=True)
+                log_msg(report + "\n", "system")
+                result = "RAPPORT PROXMOX :\n" + report
+
+            elif fn == "proxmox_vm_action":
+                vmid = fn_args.get("vmid")
+                action = fn_args.get("action", "")
+                log_msg(f"🖥️ Action Proxmox : {action} sur VM {vmid}\n", "agent")
+                result = proxmox_monitor.vm_action(load_credentials(), vmid, action)
+
             elif fn == "generate_image":
                 log_msg(f"🎨 Génération image : {fn_args.get('description', '')[:100]}\n", "agent")
                 result = brain_generate_image(
@@ -1658,6 +1704,30 @@ def brain_generate_image(path: str, description: str, width: int = 1200, height:
         )
     except Exception as e:
         return f"Erreur génération image : {e}"
+
+
+def _proxmox_monitor_loop():
+    """Surveillance Proxmox : toutes les 15 min si activée. Rapport sur l'app/web + ntfy si problème."""
+    import time as _time
+    while True:
+        try:
+            creds = load_credentials()
+            if creds.get("proxmox_enabled") and creds.get("proxmox_url"):
+                report, issues = proxmox_monitor.check_and_report(creds, notify_ntfy=True)
+                # Journalise vers le client app connecté (Tkinter) et l'interface web
+                try:
+                    inst = RemoteAppInstance(conn=None)
+                    inst.log("🖥️ [Surveillance Proxmox]\n" + report + "\n", "system")
+                except Exception:
+                    pass
+                try:
+                    import web_app
+                    web_app.HUB.append_log("🖥️ [Surveillance Proxmox]\n" + report + "\n", "system")
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[Proxmox] Erreur boucle surveillance : {e}")
+        _time.sleep(900)  # 15 minutes
 
 
 def apply_credentials_sync(msg: dict, app_instance=None) -> dict:
@@ -1955,6 +2025,7 @@ if __name__ == "__main__":
 
     threading.Thread(target=MAIL_WATCHER.watch_loop, daemon=True).start()
     threading.Thread(target=_watchdog_loop, daemon=True).start()
+    threading.Thread(target=_proxmox_monitor_loop, daemon=True).start()
 
     try:
         import web_app
@@ -1986,6 +2057,7 @@ if __name__ == "__main__":
             has_openrouter_fn=lambda: bool(load_credentials().get("extra_api_key") or engine_terra.load_api_key()),
             queue_len_fn=lambda: len(MAIL_WATCHER.queue),
             missions_html_fn=_missions_html,
+            proxmox_report_html_fn=lambda: proxmox_monitor.load_last_report().replace("<", "&lt;"),
         )
     except Exception as e:
         print(f"[WebApp] ⚠️ Interface web non disponible : {e}")

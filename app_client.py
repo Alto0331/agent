@@ -455,6 +455,54 @@ class AgentClientApp:
         ).grid(row=0, column=2, padx=2)
         g_mistral.columnconfigure(1, weight=1)
 
+        # --- ONGLET 6 : SUPERVISION (PROXMOX + NTFY) ---
+        tab_superv = tk.Frame(self.notebook, bg="#1e293b", padx=8, pady=8)
+        self.notebook.add(tab_superv, text="🖥️ Supervision")
+
+        self.var_proxmox_enabled = tk.BooleanVar(value=self.config.get("proxmox_enabled", False))
+        tk.Checkbutton(
+            tab_superv,
+            text="Surveillance Proxmox active (vérification toutes les 15 min + alertes)",
+            variable=self.var_proxmox_enabled,
+            bg="#1e293b", fg="#10b981", selectcolor="#0f172a",
+            activebackground="#1e293b", activeforeground="#10b981",
+            font=("Segoe UI", 8, "bold")
+        ).pack(anchor="w", pady=(0, 6))
+
+        g_px = tk.Frame(tab_superv, bg="#1e293b")
+        g_px.pack(fill=tk.X)
+        tk.Label(g_px, text="URL Proxmox :", fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8, "bold")).grid(row=0, column=0, sticky="w", pady=2)
+        self.var_proxmox_url = tk.StringVar(value=self.config.get("proxmox_url", ""))
+        tk.Entry(g_px, textvariable=self.var_proxmox_url, bg="#0f172a", fg="white", insertbackground="white", relief=tk.FLAT).grid(row=0, column=1, sticky="ew", padx=6, pady=2, ipady=2)
+        tk.Label(g_px, text="Token ID :", fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8, "bold")).grid(row=1, column=0, sticky="w", pady=2)
+        self.var_proxmox_token = tk.StringVar(value=self.config.get("proxmox_token", ""))
+        tk.Entry(g_px, textvariable=self.var_proxmox_token, bg="#0f172a", fg="white", insertbackground="white", relief=tk.FLAT).grid(row=1, column=1, sticky="ew", padx=6, pady=2, ipady=2)
+        tk.Label(g_px, text="Secret :", fg="#fde047", bg="#1e293b", font=("Segoe UI", 8, "bold")).grid(row=2, column=0, sticky="w", pady=2)
+        self.var_proxmox_secret = tk.StringVar(value=self.config.get("proxmox_secret", ""))
+        self.ent_px_secret = tk.Entry(g_px, textvariable=self.var_proxmox_secret, show="*", bg="#0f172a", fg="#fde047", insertbackground="white", relief=tk.FLAT, font=("Consolas", 9))
+        self.ent_px_secret.grid(row=2, column=1, sticky="ew", padx=6, pady=2, ipady=2)
+        tk.Button(g_px, text="👁", bg="#334155", fg="white", bd=0, padx=6,
+                  command=lambda: self._toggle_password_visibility(self.ent_px_secret)).grid(row=2, column=2, padx=2)
+        g_px.columnconfigure(1, weight=1)
+
+        tk.Label(tab_superv, text="🔔 Notifications ntfy (application mobile)", fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(8, 2))
+        self.var_ntfy_enabled = tk.BooleanVar(value=self.config.get("ntfy_enabled", False))
+        tk.Checkbutton(tab_superv, text="Envoyer une notification si problème détecté",
+            variable=self.var_ntfy_enabled, bg="#1e293b", fg="#10b981", selectcolor="#0f172a",
+            activebackground="#1e293b", activeforeground="#10b981", font=("Segoe UI", 8)).pack(anchor="w")
+        g_nt = tk.Frame(tab_superv, bg="#1e293b")
+        g_nt.pack(fill=tk.X)
+        tk.Label(g_nt, text="Serveur :", fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w", pady=2)
+        self.var_ntfy_url = tk.StringVar(value=self.config.get("ntfy_url", "https://ntfy.sh"))
+        tk.Entry(g_nt, textvariable=self.var_ntfy_url, bg="#0f172a", fg="white", insertbackground="white", relief=tk.FLAT).grid(row=0, column=1, sticky="ew", padx=6, pady=2, ipady=2)
+        tk.Label(g_nt, text="Topic :", fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8)).grid(row=1, column=0, sticky="w", pady=2)
+        self.var_ntfy_topic = tk.StringVar(value=self.config.get("ntfy_topic", ""))
+        tk.Entry(g_nt, textvariable=self.var_ntfy_topic, bg="#0f172a", fg="white", insertbackground="white", relief=tk.FLAT).grid(row=1, column=1, sticky="ew", padx=6, pady=2, ipady=2)
+        g_nt.columnconfigure(1, weight=1)
+
+        tk.Label(tab_superv, text="💡 Token : Proxmox → Datacenter → Permissions → API Tokens (lecture seule suffit pour surveiller).\n📱 Abonne-toi au topic dans l'app ntfy pour recevoir les alertes.",
+            fg="#94a3b8", bg="#1e293b", justify=tk.LEFT, font=("Segoe UI", 7)).pack(anchor="w", pady=(4, 0))
+
         # --- BOUTON GLOBAL DE SAUVEGARDE & SYNCHRONISATION ---
         tk.Button(
             self.submenu_frame,
@@ -514,6 +562,16 @@ class AgentClientApp:
 
         # 5. Relai Mistral (clé perso)
         self.config["mistral_api_key"] = self.var_mistral_key.get().strip()
+
+        # 6. Supervision Proxmox + ntfy
+        self.config["proxmox_enabled"] = bool(self.var_proxmox_enabled.get())
+        self.config["proxmox_url"] = self.var_proxmox_url.get().strip()
+        self.config["proxmox_token"] = self.var_proxmox_token.get().strip()
+        if self.var_proxmox_secret.get().strip():
+            self.config["proxmox_secret"] = self.var_proxmox_secret.get().strip()
+        self.config["ntfy_enabled"] = bool(self.var_ntfy_enabled.get())
+        self.config["ntfy_url"] = self.var_ntfy_url.get().strip() or "https://ntfy.sh"
+        self.config["ntfy_topic"] = self.var_ntfy_topic.get().strip()
 
         # 3. Modèle Local Ollama
         self.config["use_ollama"] = bool(self.var_use_ollama.get())
