@@ -638,15 +638,30 @@ async function saveAll(){
 /* ===== LOGIN/BOOT ===== */
 async function login(){
   const btn=document.querySelector('#login .btn');
+  const err=$('loginErr');
   btn.disabled=true;btn.textContent='Connexion…';
+  err.style.color='var(--mut)';
+  err.textContent='Étape 1/4 : envoi du PIN…';
   try{
     const resp=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({pin:$('pin').value})});
+    err.textContent='Étape 2/4 : réponse reçue (HTTP '+resp.status+')…';
     if(!resp.ok&&resp.status!==403){throw new Error('HTTP '+resp.status);}
     const r=await resp.json();
-    if(r.ok){TOKEN=r.token;saveTok(TOKEN);$('loginErr').textContent='';location.reload();}
-    else $('loginErr').textContent='PIN incorrect — le PIN actuel est affiché dans la console du serveur';
-  }catch(e){$('loginErr').textContent='Erreur réseau ('+(e.message||e)+') — VM injoignable : vérifie VPN/WiFi/pare-feu';}
+    err.textContent='Étape 3/4 : réponse serveur…';
+    if(r.ok){
+      TOKEN=r.token;saveTok(TOKEN);
+      err.style.color='var(--ok)';err.textContent='Étape 4/4 : connecté ! Rechargement…';
+      $('login').style.display='none';$('app').style.display='flex';
+      poll();loadSessions();
+      setTimeout(()=>location.reload(),1500);
+      return;}
+    err.style.color='var(--err)';
+    err.textContent='PIN incorrect — le PIN actuel est affich\u00e9 dans la console du serveur';
+  }catch(e){
+    err.style.color='var(--err)';
+    err.textContent='Erreur r\u00e9seau ('+(e.message||e)+') — VM injoignable';
+  }
   btn.disabled=false;btn.textContent='Se connecter';}
 $('pin').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
 $('mission').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMission();}});
@@ -654,7 +669,9 @@ $('mission').addEventListener('input',function(){this.style.height='auto';this.s
 (async()=>{if(TOKEN){const s=await api('status').catch(()=>null);
   if(s&&s.ok!==false){$('login').style.display='none';$('app').style.display='flex';
   const saved=localStorage.getItem('wa_engine');if(saved)$('engineSel').value=saved;
-  loadSessions();new boot();}}})();
+  loadSessions();new boot();}
+  else{const el=$('loginErr');if(el){el.style.color='var(--err)';
+  el.textContent='Session non reconnue (token invalide) — reconnecte-toi.';}}}})();
 function boot(){poll();}
 </script>
 </body>
