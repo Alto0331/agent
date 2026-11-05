@@ -47,8 +47,18 @@ def _is_protected(path: str) -> bool:
     """True si le chemin cible un fichier vital de l'agent (écriture/déplacement/suppression interdits).
     Robuste sur tous les OS : normalise les séparateurs avant d'extraire le nom de fichier."""
     try:
-        base = str(path).replace("\\", "/").rstrip("/").split("/")[-1].lower()
-        return base in [f.lower() for f in AGENT_PROTECTED_FILES]
+        norm = str(path).replace("\\", "/").rstrip("/")
+        parts = [p.lower() for p in norm.split("/") if p]
+        if not parts:
+            return False
+        base = parts[-1]
+        if base in [f.lower() for f in AGENT_PROTECTED_FILES]:
+            return True
+        # web/index.html de l'agent (interface web) : protéger ce chemin précis,
+        # sans bloquer les index.html des sites démo (dossiers quelconques)
+        if base == "index.html" and len(parts) >= 2 and parts[-2] == "web":
+            return True
+        return False
     except Exception:
         return False
 
