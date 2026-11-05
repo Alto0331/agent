@@ -634,16 +634,6 @@ class Handler(BaseHTTPRequestHandler):
                                "current": HUB.active_session,
                                "title": HUB.sessions.get(HUB.active_session, {}).get("title", "")})
 
-        if u.path == "/api/proxmox_check":
-            try:
-                import proxmox_monitor
-                creds = HUB.hooks["load_credentials"]()
-                report, issues = proxmox_monitor.check_and_report(creds, notify_ntfy=True)
-                HUB.append_log("🖥️ [Proxmox — vérification manuelle]\n" + report + "\n", "system")
-                return self._json({"ok": True, "report": report, "issues_count": len(issues)})
-            except Exception as e:
-                return self._json({"ok": False, "error": str(e)})
-
         if u.path == "/api/missions":
             html = HUB.hooks.get("missions_html", lambda: "")()
             proxmox_html = HUB.hooks.get("proxmox_report_html", lambda: "")()
@@ -739,6 +729,16 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 HUB.hooks["apply_credentials_sync"](payload, HUB.current_instance)
                 return self._json({"ok": True})
+            except Exception as e:
+                return self._json({"ok": False, "error": str(e)})
+
+        if u.path == "/api/proxmox_check":
+            try:
+                import proxmox_monitor
+                creds = HUB.hooks["load_credentials"]()
+                report, issues = proxmox_monitor.check_and_report(creds, notify_ntfy=True)
+                HUB.append_log("🖥️ [Proxmox — vérification manuelle]\n" + report + "\n", "system")
+                return self._json({"ok": True, "report": report, "issues_count": len(issues)})
             except Exception as e:
                 return self._json({"ok": False, "error": str(e)})
 
