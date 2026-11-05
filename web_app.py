@@ -317,11 +317,70 @@ label{font-size:11.5px;color:var(--mut);display:block;margin:9px 0 2px;font-weig
 <div id="login"><div class="box">
   <div class="logo">🤖</div>
   <h1>Agent VM</h1>
-  <p class="mut" style="margin-bottom:10px">Interface v3.9</p>
+  <p class="mut" style="margin-bottom:10px">Interface v4.0</p>
   <input id="pin" class="txt" type="password" inputmode="numeric" placeholder="PIN à 6 chiffres" autofocus>
   <button class="btn" onclick="this.textContent='CLIC RECU !';login()">Se connecter</button>
   <p class="mut" id="loginErr" style="color:var(--err);margin-top:10px"></p>
 </div></div>
+<script>
+// ===== BLOC LOGIN AUTONOME =====
+function saveTok(t){try{localStorage.setItem('wa_tok',t);}catch(e){}
+  try{sessionStorage.setItem('wa_tok',t);}catch(e){}
+  try{document.cookie='wa_tok='+t+';path=/;max-age=31536000;SameSite=Strict';}catch(e){}}
+function loadTok(){try{let t=localStorage.getItem('wa_tok');if(t)return t;}catch(e){}
+  try{let t=sessionStorage.getItem('wa_tok');if(t)return t;}catch(e){}
+  try{let m=document.cookie.match(/(?:^|; )wa_tok=([^;]+)/);if(m)return m[1];}catch(e){}
+  return '';}
+var TOKEN=loadTok();
+var $=function(id){return document.getElementById(id);};
+var api=function(path,data){return fetch('/api/'+path,{method:data?'POST':'GET',
+  headers:{'Content-Type':'application/json','X-Auth':TOKEN},
+  body:data?JSON.stringify(data):undefined}).then(function(r){return r.json();});};
+async function login(){
+  var btn=document.querySelector('#login .btn');
+  var err=$('loginErr');
+  btn.disabled=true;btn.textContent='Connexion…';
+  err.style.color='var(--mut)';
+  err.textContent='Étape 1/4 : envoi du PIN…';
+  try{
+    var resp=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({pin:$('pin').value})});
+    err.textContent='Étape 2/4 : réponse reçue (HTTP '+resp.status+')…';
+    if(!resp.ok&&resp.status!==403){throw new Error('HTTP '+resp.status);}
+    var r=await resp.json();
+    err.textContent='Étape 3/4 : réponse serveur…';
+    if(r.ok){
+      TOKEN=r.token;saveTok(TOKEN);
+      err.style.color='var(--ok)';err.textContent='Étape 4/4 : connecté !';
+      $('login').style.display='none';$('app').style.display='flex';
+      if(window.poll)poll();
+      if(window.loadSessions)loadSessions();
+      return;}
+    err.style.color='var(--err)';
+    err.textContent='PIN incorrect — le PIN actuel est affiché dans la console du serveur';
+  }catch(e){
+    err.style.color='var(--err)';
+    err.textContent='Erreur réseau ('+(e.message||e)+') — VM injoignable';
+  }
+  btn.disabled=false;btn.textContent='Se connecter';}
+document.addEventListener('DOMContentLoaded',function(){
+  var pin=$('pin');
+  if(pin)pin.addEventListener('keydown',function(e){if(e.key==='Enter')login();});
+  if(TOKEN){
+    api('status').then(function(s){
+      if(s&&s.ok!==false){
+        $('login').style.display='none';$('app').style.display='flex';
+        if(window.poll)poll();
+        if(window.loadSessions)loadSessions();
+      }else{
+        var el=$('loginErr');
+        if(el){el.style.color='var(--err)';
+        el.textContent='Session non reconnue (token invalide) — reconnecte-toi.';}
+      }
+    }).catch(function(){});
+  }
+});
+</script>
 
 <div id="app" style="display:none">
 <div id="overlay" onclick="closeAll()"></div>
@@ -392,19 +451,8 @@ if(typeof Promise==='undefined'||typeof fetch==='undefined'){
     if(el){el.textContent='Navigateur trop ancien : cette interface exige Chrome ou Edge r\u00e9cent (ES2017).';}
   });
 }
-function saveTok(t){try{localStorage.setItem('wa_tok',t);}catch(e){}
-  try{sessionStorage.setItem('wa_tok',t);}catch(e){}
-  try{document.cookie='wa_tok='+t+';path=/;max-age=31536000;SameSite=Strict';}catch(e){}}
-function loadTok(){try{let t=localStorage.getItem('wa_tok');if(t)return t;}catch(e){}
-  try{let t=sessionStorage.getItem('wa_tok');if(t)return t;}catch(e){}
-  try{let m=document.cookie.match(/(?:^|; )wa_tok=([^;]+)/);if(m)return m[1];}catch(e){}
-  return '';}
-let TOKEN=loadTok();let lastId=0;let sessViewed=0;
-const $=id=>document.getElementById(id);
+let lastId=0;var sessViewed=0;
 function toast(msg,ok=true){const t=$('toast');t.textContent=msg;t.style.borderColor=ok?'var(--ok)':'var(--err)';t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2500);}
-const api=(path,data)=>fetch('/api/'+path,{method:data?'POST':'GET',
-  headers:{'Content-Type':'application/json','X-Auth':TOKEN},
-  body:data?JSON.stringify(data):undefined}).then(r=>r.json());
 /* ===== SESSIONS ===== */
 async function loadSessions(){
   const r=await api('sessions');
@@ -636,43 +684,11 @@ async function saveAll(){
   $('saveMsg').style.color=r.ok?'var(--ok)':'var(--err)';
   if(r.ok)toast('Sauvegardé ✅');}
 /* ===== LOGIN/BOOT ===== */
-async function login(){
-  const btn=document.querySelector('#login .btn');
-  const err=$('loginErr');
-  btn.disabled=true;btn.textContent='Connexion…';
-  err.style.color='var(--mut)';
-  err.textContent='Étape 1/4 : envoi du PIN…';
-  try{
-    const resp=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({pin:$('pin').value})});
-    err.textContent='Étape 2/4 : réponse reçue (HTTP '+resp.status+')…';
-    if(!resp.ok&&resp.status!==403){throw new Error('HTTP '+resp.status);}
-    const r=await resp.json();
-    err.textContent='Étape 3/4 : réponse serveur…';
-    if(r.ok){
-      TOKEN=r.token;saveTok(TOKEN);
-      err.style.color='var(--ok)';err.textContent='Étape 4/4 : connecté ! Rechargement…';
-      $('login').style.display='none';$('app').style.display='flex';
-      poll();loadSessions();
-      setTimeout(()=>location.reload(),1500);
-      return;}
-    err.style.color='var(--err)';
-    err.textContent='PIN incorrect — le PIN actuel est affich\u00e9 dans la console du serveur';
-  }catch(e){
-    err.style.color='var(--err)';
-    err.textContent='Erreur r\u00e9seau ('+(e.message||e)+') — VM injoignable';
-  }
-  btn.disabled=false;btn.textContent='Se connecter';}
-$('pin').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
 $('mission').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMission();}});
 $('mission').addEventListener('input',function(){this.style.height='auto';this.style.height=Math.min(this.scrollHeight,130)+'px';});
-(async()=>{if(TOKEN){const s=await api('status').catch(()=>null);
-  if(s&&s.ok!==false){$('login').style.display='none';$('app').style.display='flex';
+(async()=>{try{
   const saved=localStorage.getItem('wa_engine');if(saved)$('engineSel').value=saved;
-  loadSessions();new boot();}
-  else{const el=$('loginErr');if(el){el.style.color='var(--err)';
-  el.textContent='Session non reconnue (token invalide) — reconnecte-toi.';}}}})();
-function boot(){poll();}
+  if(TOKEN)loadSessions();poll();}catch(e){}})();
 </script>
 </body>
 </html>"""
