@@ -447,12 +447,100 @@ async function openSettings(){
   $('set-ntfy-url').value=s.ntfy_url||'https://ntfy.sh';
   $('set-ntfy-topic').value=s.ntfy_topic||'';}
 async function openProblems(){
-  const r=await api('missions');
-  openDrawer(`<h2>🧭 Missions récentes</h2>
-  <div class="card" style="font-size:12px;line-height:1.8">${r.html||'Aucune mission enregistrée.'}</div>
-  <h2>🖥️ Infrastructure Proxmox</h2>
-  <div class="card" style="font-size:12px;line-height:1.8;white-space:pre-wrap">${r.proxmox||'Aucun rapport pour l\'instant.'}</div>
-  <button class="btn" onclick="proxmoxCheck()">🔍 Vérifier maintenant</button>`);}
+  openDrawer('<h2>🖥️ Tableau de bord Proxmox</h2><p class="mut">Chargement…</p>');
+  const d=await api('proxmox_data');
+  const c=$('drawer-content');
+  c.querySelector('.mut').remove();
+  if(!d.ok){
+    const p=document.createElement('div');p.className='card';p.style.fontSize='12.5px';
+    p.textContent=d.error||'Erreur';c.appendChild(p);
+    const rb=document.createElement('button');rb.className='btn';rb.style.marginTop='8px';
+    rb.textContent='Réessayer';rb.onclick=openProblems;c.appendChild(rb);
+    const mh=document.createElement('h2');mh.textContent='🧭 Missions récentes';c.appendChild(mh);
+    const r1=await api('missions');
+    const mc=document.createElement('div');mc.className='card';mc.style.cssText='font-size:12px;line-height:1.8';
+    mc.innerHTML=r1.html||'Aucune mission enregistrée.';c.appendChild(mc);return;}
+  const sum=document.createElement('div');sum.className='pxsum';
+  const running=d.vms.filter(v=>v.status==='running').length;
+  const crit=d.issues.filter(i=>i.severity==='CRITIQUE').length;
+  const kpi=(b,s,col)=>{const k=document.createElement('div');k.className='kpi';
+    const bb=document.createElement('b');bb.textContent=b;if(col)bb.style.color=col;
+    const sp=document.createElement('span');sp.textContent=s;
+    k.appendChild(bb);k.appendChild(sp);sum.appendChild(k);};
+  kpi(d.nodes.length,'Nœuds');kpi(d.vms.length,'VMs/CTs');
+  kpi(running,'En cours','#10b981');
+  kpi(d.issues.length,'Problèmes',d.issues.length?(crit?'#ef4444':'#f59e0b'):'#10b981');
+  c.appendChild(sum);
+  const h1=document.createElement('h2');h1.textContent='🖥️ Nœuds';c.appendChild(h1);
+  for(const n of d.nodes){
+    const card=document.createElement('div');card.className='pxnode';
+    const nm=document.createElement('div');nm.className='name';
+    const st=document.createElement('span');st.textContent=n.online?'●':'●';
+    st.style.color=n.online?'#10b981':'#ef4444';nm.appendChild(st);
+    nm.appendChild(document.createTextNode(' '+n.name));
+    const up=document.createElement('span');up.style.cssText='margin-left:auto;font-size:10.5px;color:var(--mut)';
+    up.textContent='uptime '+Math.floor(n.uptime_h/24)+'j'+(n.uptime_h%24)+'h';nm.appendChild(up);
+    card.appendChild(nm);
+    const gauge=(lbl,pct,txt)=>{
+      const s=document.createElement('div');s.className='pxstat';
+      const l=document.createElement('span');l.textContent=lbl;
+      const v=document.createElement('span');v.textContent=txt||Math.round(pct)+'%';
+      s.appendChild(l);s.appendChild(v);card.appendChild(s);
+      const g=document.createElement('div');g.className='pxgauge';
+      const f=document.createElement('div');
+      f.style.width=Math.min(100,pct)+'%';
+      f.style.background=pct>85?'#ef4444':(pct>65?'#f59e0b':'#10b981');
+      g.appendChild(f);card.appendChild(g);};
+    gauge('CPU',n.cpu);gauge('RAM',n.ram,n.ram_gb+' / '+n.ram_max_gb+' Go');gauge('Disque système',n.disk);
+    c.appendChild(card);}
+  const h2=document.createElement('h2');h2.textContent='💻 Machines virtuelles';c.appendChild(h2);
+  const wrap=document.createElement('div');wrap.className='card';wrap.style.padding='8px';
+  const tbl=document.createElement('table');tbl.className='pxtable';
+  tbl.innerHTML='<tr><th>ID</th><th>Nom</th><th>Nœud</th><th>État</th><th>CPU</th><th>RAM</th></tr>';
+  for(const v of d.vms){
+    const tr=document.createElement('tr');
+    const td=(txt)=>{const x=document.createElement('td');x.textContent=txt;tr.appendChild(x);};
+    td(v.vmid);td(v.name+' ('+v.type+')');td(v.node);
+    const sd=document.createElement('td');
+    const b=document.createElement('span');b.className='badge '+(v.status==='running'?'run':'stop');
+    b.textContent=v.status==='running'?'running':v.status;sd.appendChild(b);tr.appendChild(sd);
+    td(Math.round(v.cpu)+'%');td(v.ram_gb+' / '+v.ram_max_gb+' Go');
+    tbl.appendChild(tr);}
+  wrap.appendChild(tbl);c.appendChild(wrap);
+  if(d.storage.length){
+    const h3=document.createElement('h2');h3.textContent='💿 Stockages';c.appendChild(h3);
+    for(const s of d.storage){
+      const card=document.createElement('div');card.className='pxnode';
+      const nm=document.createElement('div');nm.className='name';
+      nm.textContent=s.name+(s.active?'':' (inactif)');
+      const pct=document.createElement('span');pct.style.cssText='margin-left:auto;font-size:11px';
+      pct.textContent=s.used_gb+' / '+s.total_gb+' Go';nm.appendChild(pct);
+      card.appendChild(nm);
+      const g=document.createElement('div');g.className='pxgauge';
+      const f=document.createElement('div');f.style.width=Math.min(100,s.pct)+'%';
+      f.style.background=s.pct>85?'#ef4444':(s.pct>65?'#f59e0b':'#10b981');
+      g.appendChild(f);card.appendChild(g);c.appendChild(card);}}
+  const h4=document.createElement('h2');h4.textContent='🚨 Problèmes détectés';c.appendChild(h4);
+  if(!d.issues.length){
+    const ok=document.createElement('div');ok.className='card';
+    ok.style.cssText='color:#10b981;font-size:13px';ok.textContent='✅ Aucun problème : tout est nominal.';
+    c.appendChild(ok);}
+  else for(const i of d.issues){
+    const div=document.createElement('div');div.className='pxissue'+(i.severity==='CRITIQUE'?' crit':'');
+    const t=document.createElement('div');
+    const b=document.createElement('span');b.className='badge '+(i.severity==='CRITIQUE'?'crit':'alert');
+    b.textContent=i.severity;t.appendChild(b);
+    t.appendChild(document.createTextNode(' '+i.element));div.appendChild(t);
+    const p=document.createElement('div');p.style.marginTop='4px';p.textContent=i.problem;div.appendChild(p);
+    const ul=document.createElement('ul');ul.style.cssText='margin:6px 0 0 18px;color:var(--mut)';
+    for(const s of i.solutions){const li=document.createElement('li');li.textContent=s;ul.appendChild(li);}
+    div.appendChild(ul);c.appendChild(div);}
+  const b2=document.createElement('button');b2.className='btn';b2.style.marginTop='6px';
+  b2.textContent='Actualiser';b2.onclick=openProblems;c.appendChild(b2);
+  const mh=document.createElement('h2');mh.textContent='🧭 Missions récentes';c.appendChild(mh);
+  const r2=await api('missions');
+  const mc2=document.createElement('div');mc2.className='card';mc2.style.cssText='font-size:12px;line-height:1.8';
+  mc2.innerHTML=r2.html||'Aucune mission enregistrée.';c.appendChild(mc2);}
 async function proxmoxCheck(){
   toast('Vérification Proxmox en cours…');
   const r=await api('proxmox_check',{});

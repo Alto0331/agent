@@ -248,6 +248,51 @@ def send_ntfy(ntfy_url: str, topic: str, title: str, message: str, priority: str
 # POINT D'ENTRÉE : VÉRIFICATION COMPLÈTE
 # ==============================================================================
 
+def get_dashboard_data(creds: dict) -> dict:
+    """Données structurées pour le tableau de bord web (style Datacenter Summary)."""
+    url = creds.get("proxmox_url", "")
+    token = creds.get("proxmox_token", "")
+    secret = creds.get("proxmox_secret", "")
+    if not (url and token and secret):
+        return {"ok": False, "configured": False, "error": "Proxmox non configuré (URL/token/secret) — Réglages → Supervision."}
+    try:
+        snapshot = get_cluster_snapshot(url, token, secret)
+    except Exception as e:
+        return {"ok": False, "configured": True, "error": f"Erreur d'accès API : {e}"}
+    issues = analyze_snapshot(snapshot)
+    nodes = []
+    for n in snapshot.get("nodes", []):
+        nodes.append({
+            "name": n.get("node", "?"),
+            "online": n.get("status") == "online",
+            "cpu": round(n.get("cpu", 0) * 100, 1),
+            "ram": round((n.get("mem", 0) / n.get("maxmem", 1)) * 100, 1) if n.get("maxmem") else 0,
+            "disk": round((n.get("disk", 0) / n.get("maxdisk", 1)) * 100, 1) if n.get("maxdisk") else 0,
+            "ram_gb": round(n.get("mem", 0) / 1e9, 1), "ram_max_gb": round(n.get("maxmem", 0) / 1e9, 1),
+            "uptime_h": int(n.get("uptime", 0) // 3600),
+        })
+    vms = []
+    for v in snapshot.get("vms", []):
+        vms.append({
+            "vmid": v.get("vmid"), "name": v.get("name", "?"), "node": v.get("node", "?"),
+            "type": "CT" if v.get("type") == "lxc" else "VM",
+            "status": v.get("status", "?"),
+            "cpu": round(v.get("cpu", 0) * 100, 1),
+            "ram": round((v.get("mem", 0) / v.get("maxmem", 1)) * 100, 1) if v.get("maxmem") else 0,
+            "ram_gb": round(v.get("mem", 0) / 1e9, 1), "ram_max_gb": round(v.get("maxmem", 0) / 1e9, 1),
+        })
+    storage = []
+    for s in snapshot.get("storage", []):
+        total = s.get("maxdisk", s.get("total", 0))
+        storage.append({
+            "name": s.get("storage", "?"), "active": bool(s.get("active", 0)),
+            "used_gb": round(s.get("used", 0) / 1e9, 1), "total_gb": round(total / 1e9, 1),
+            "pct": round((s.get("used", 0) / total) * 100, 1) if total else 0,
+        })
+    return {"ok": True, "configured": True, "nodes": nodes, "vms": vms, "storage": storage,
+            "issues": issues, "ts": time.time()}
+
+
 def check_and_report(creds: dict, notify_ntfy: bool = True, log_fn=None) -> tuple:
     """
     Vérifie le cluster Proxmox, produit le rapport, le sauvegarde,
