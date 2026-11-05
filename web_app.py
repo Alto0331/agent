@@ -317,9 +317,9 @@ label{font-size:11.5px;color:var(--mut);display:block;margin:9px 0 2px;font-weig
 <div id="login"><div class="box">
   <div class="logo">🤖</div>
   <h1>Agent VM</h1>
-  <p class="mut" style="margin-bottom:10px">Interface v3.8</p>
+  <p class="mut" style="margin-bottom:10px">Interface v3.9</p>
   <input id="pin" class="txt" type="password" inputmode="numeric" placeholder="PIN à 6 chiffres" autofocus>
-  <button class="btn" onclick="login()">Se connecter</button>
+  <button class="btn" onclick="this.textContent='CLIC RECU !';login()">Se connecter</button>
   <p class="mut" id="loginErr" style="color:var(--err);margin-top:10px"></p>
 </div></div>
 
@@ -382,15 +382,15 @@ label{font-size:11.5px;color:var(--mut);display:block;margin:9px 0 2px;font-weig
 </div>
 <div id="toast"></div>
 <script>
-// ES5 : verifie le navigateur et affiche TOUTE erreur JS sur l'ecran de login
+window.onerror=function(msg){try{var el=document.getElementById('loginErr');
+  if(el){el.textContent='Erreur JS : '+msg;el.style.color='#ef4444';}}catch(e){}};
+</script>
+<script>
 if(typeof Promise==='undefined'||typeof fetch==='undefined'){
   document.addEventListener('DOMContentLoaded',function(){
     var el=document.getElementById('loginErr');
     if(el){el.textContent='Navigateur trop ancien : cette interface exige Chrome ou Edge r\u00e9cent (ES2017).';}
   });
-}else{
-  window.onerror=function(msg){try{var el=document.getElementById('loginErr');
-    if(el){el.textContent='Erreur JS : '+msg;}return false;}catch(e){}};
 }
 function saveTok(t){try{localStorage.setItem('wa_tok',t);}catch(e){}
   try{sessionStorage.setItem('wa_tok',t);}catch(e){}
