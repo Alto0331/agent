@@ -35,10 +35,36 @@ def run_shell_command(command: str, timeout: int = 30) -> str:
         return f"Erreur d'exécution : {e}"
 
 
+# Fichiers vitaux de l'agent : INTERDICTION de modification (l'agent ne doit jamais se saborder)
+AGENT_PROTECTED_FILES = [
+    "agent_server.py", "web_app.py", "app_client.py", "agent_hooks.py",
+    "variant_agentterratest.py", "agent_core.py", "proxmox_monitor.py",
+    "credentials.json", "trusted_senders.enc", "web_tokens.json", "setup_vm.bat",
+]
+
+
+def _is_protected(path: str) -> bool:
+    """True si le chemin cible un fichier vital de l'agent (écriture/déplacement/suppression interdits).
+    Robuste sur tous les OS : normalise les séparateurs avant d'extraire le nom de fichier."""
+    try:
+        base = str(path).replace("\\", "/").rstrip("/").split("/")[-1].lower()
+        return base in [f.lower() for f in AGENT_PROTECTED_FILES]
+    except Exception:
+        return False
+
+
 def file_operation(action: str, path: str, destination: str = "", content: str = "") -> str:
     """Opérations fichiers directes sans souris : list, read, write, mkdir, delete, move, copy."""
     p = os.path.expandvars(os.path.expanduser(path.strip().strip('"')))
     a = (action or "").lower().strip()
+
+    # Garde-fou : protéger les fichiers vitaux de l'agent
+    if a in ["write", "delete", "del", "rm", "move", "mv", "rename"] and _is_protected(p):
+        return f"⛔ REFUSÉ : {os.path.basename(p)} est un fichier vital de l'agent. Sa modification est interdite (risque de casser le serveur/l'interface)."
+    if a in ["move", "mv", "rename"] and _is_protected(destination):
+        return f"⛔ REFUSÉ : {os.path.basename(destination)} est un fichier vital de l'agent, impossible de l'écraser."
+    if a == "copy" and _is_protected(destination):
+        return f"⛔ REFUSÉ : {os.path.basename(destination)} est un fichier vital de l'agent, impossible de l'écraser."
 
     if a in ["list", "ls", "dir"]:
         if not os.path.isdir(p):
