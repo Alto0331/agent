@@ -275,21 +275,40 @@ def send_ntfy(ntfy_url: str, topic: str, title: str, message: str, priority: str
 # ==============================================================================
 
 def get_dashboard_data(creds: dict) -> dict:
-    """Données structurées pour le tableau de bord web (style Datacenter Summary)."""
-    url = creds.get("proxmox_url", "")
-    token = creds.get("proxmox_token", "")
-    secret = creds.get("proxmox_secret", "")
-    if not (url and token and secret):
+    """Données structurées pour le tableau de bord web (style Datacenter Summary).
+    Itère sur tous les hôtes configurés (proxmox_hosts ou rétrocompatibilité clé unique)."""
+    hosts = get_proxmox_hosts(creds)
+    if not hosts:
         return {"ok": False, "configured": False, "error": "Proxmox non configuré (URL/token/secret) — Réglages → Supervision."}
-    try:
-        snapshot = get_cluster_snapshot(url, token, secret)
-    except Exception as e:
-        return {"ok": False, "configured": True, "error": f"Erreur d'accès API : {e}"}
-    issues = analyze_snapshot(snapshot)
+    nodes, vms, storage, issues = [], [], [], []
+    errors = []
+    for host in hosts:
+        try:
+            snapshot = get_cluster_snapshot(host["url"], host["token_id"], host["token_secret"])
+        except Exception as e:
+            errors.append(f"[{host['name']}] {e}")
+            continue
+        h_issues = analyze_snapshot(snapshot)
+        for i in h_issues:
+            i["element"] = f"[{host['name']}] {i['element']}"
+        issues.extend(h_issues)
+        for n in snapshot.get("nodes", []):
+            n["_host"] = host["name"]
+            nodes.append(n)
+        for v in snapshot.get("vms", []):
+            v["_host"] = host["name"]
+            vms.append(v)
+        for s in snapshot.get("storage", []):
+            s["_host"] = host["name"]
+            storage.append(s)
+    if errors and not nodes:
+        return {"ok": False, "configured": True, "error": "Erreur d'accès API : " + " | ".join(errors)}
+    snapshot = {"nodes": nodes, "vms": vms, "storage": storage}
     nodes = []
     for n in snapshot.get("nodes", []):
         nodes.append({
             "name": n.get("node", "?"),
+            "host": n.get("_host", ""),
             "online": n.get("status") == "online",
             "cpu": round(n.get("cpu", 0) * 100, 1),
             "ram": round((n.get("mem", 0) / n.get("maxmem", 1)) * 100, 1) if n.get("maxmem") else 0,
@@ -301,6 +320,7 @@ def get_dashboard_data(creds: dict) -> dict:
     for v in snapshot.get("vms", []):
         vms.append({
             "vmid": v.get("vmid"), "name": v.get("name", "?"), "node": v.get("node", "?"),
+            "host": v.get("_host", ""),
             "type": "CT" if v.get("type") == "lxc" else "VM",
             "status": v.get("status", "?"),
             "cpu": round(v.get("cpu", 0) * 100, 1),
@@ -319,69 +339,122 @@ def get_dashboard_data(creds: dict) -> dict:
             "issues": issues, "ts": time.time()}
 
 
+def get_proxmox_hosts(creds: dict) -> list:
+    """Retourne la liste des hôtes Proxmox à surveiller.
+    Format : [{"name": str, "url": str, "token_id": str, "token_secret": str}]
+    Rétrocompatibilité : si proxmox_hosts est absent/vide, construit une liste
+    à un élément depuis les anciennes clés (proxmox_url/proxmox_token/proxmox_secret)."""
+    hosts = []
+    raw = creds.get("proxmox_hosts") or []
+    if isinstance(raw, list):
+        for h in raw:
+            if isinstance(h, dict) and h.get("url"):
+                hosts.append({
+                    "name": (h.get("name") or "proxmox").strip() or "proxmox",
+                    "url": h.get("url", ""),
+                    "token_id": h.get("token_id", ""),
+                    "token_secret": h.get("token_secret", ""),
+                })
+    if not hosts:
+        url = creds.get("proxmox_url", "")
+        if url:
+            hosts.append({
+                "name": "proxmox",
+                "url": url,
+                "token_id": creds.get("proxmox_token", ""),
+                "token_secret": creds.get("proxmox_secret", ""),
+            })
+    return hosts
+
+
 def check_and_report(creds: dict, notify_ntfy: bool = True, log_fn=None) -> tuple:
     """
     Vérifie le cluster Proxmox, produit le rapport, le sauvegarde,
     et envoie une notification ntfy si des problèmes sont détectés.
     Retourne (rapport, issues).
     """
-    url = creds.get("proxmox_url", "")
-    token = creds.get("proxmox_token", "")
-    secret = creds.get("proxmox_secret", "")
     enabled = creds.get("proxmox_enabled", False)
-    if not (enabled and url and token and secret):
+    hosts = get_proxmox_hosts(creds)
+    if not (enabled and hosts):
         return "Surveillance Proxmox non configurée (URL/token/secret). Active-la dans les Réglages.", []
-    try:
-        snapshot = get_cluster_snapshot(url, token, secret)
-    except Exception as e:
-        report = f"❌ Erreur d'accès à l'API Proxmox : {e}\nVérifie l'URL, le token (user@realm!tokenid) et le secret."
-        save_report(report, [])
-        if notify_ntfy and creds.get("ntfy_enabled") and creds.get("ntfy_topic"):
-            send_ntfy(creds.get("ntfy_url"), creds.get("ntfy_topic"),
-                      "Proxmox : erreur d'accès", report[:500], priority="urgent", tags="rotating_light")
-        return report, []
 
-    issues = analyze_snapshot(snapshot)
-    report = format_report(snapshot, issues)
-    save_report(report, issues)
+    all_issues = []
+    report_parts = []
+    for host in hosts:
+        hname = host["name"]
+        try:
+            snapshot = get_cluster_snapshot(host["url"], host["token_id"], host["token_secret"])
+        except Exception as e:
+            err_msg = f"❌ [{hname}] Erreur d'accès à l'API Proxmox : {e}\nVérifie l'URL, le token (user@realm!tokenid) et le secret."
+            report_parts.append(err_msg)
+            save_report("\n\n".join(report_parts), [])
+            if notify_ntfy and creds.get("ntfy_enabled") and creds.get("ntfy_topic"):
+                send_ntfy(creds.get("ntfy_url"), creds.get("ntfy_topic"),
+                          f"Proxmox {hname} : erreur d'accès", err_msg[:500], priority="urgent", tags="rotating_light")
+            continue
+        issues = analyze_snapshot(snapshot)
+        # Préfixe le nom d'hôte sur chaque problème pour lever toute ambiguïté
+        for i in issues:
+            i["element"] = f"[{hname}] {i['element']}"
+        all_issues.extend(issues)
+        report_parts.append(f"=== HÔTE {hname} ===\n" + format_report(snapshot, issues))
 
-    if notify_ntfy and issues and creds.get("ntfy_enabled") and creds.get("ntfy_topic"):
-        crit = [i for i in issues if i["severity"] == "CRITIQUE"]
-        title = f"Proxmox : {len(issues)} problème(s)" + (" (CRITIQUE)" if crit else "")
+    report = "\n\n".join(report_parts)
+    save_report(report, all_issues)
+
+    if notify_ntfy and all_issues and creds.get("ntfy_enabled") and creds.get("ntfy_topic"):
+        crit = [i for i in all_issues if i["severity"] == "CRITIQUE"]
+        title = f"Proxmox : {len(all_issues)} problème(s)" + (" (CRITIQUE)" if crit else "")
         send_ntfy(creds.get("ntfy_url"), creds.get("ntfy_topic"), title, report[:3500],
                   priority="urgent" if crit else "high", tags="rotating_light" if crit else "warning")
-    return report, issues
+    return report, all_issues
 
 
 # ==============================================================================
 # ACTIONS DE CONTRÔLE (utilisées par le cerveau, avec validation humaine)
 # ==============================================================================
 
-def vm_action(creds: dict, vmid: int, action: str, node: str = None) -> str:
-    """Action sur une VM : start / stop / reboot / shutdown. Actions en liste blanche uniquement."""
+def vm_action(creds: dict, vmid: int, action: str, node: str = None, pve_host: str = "") -> str:
+    """Action sur une VM/CT : start / stop / reboot / shutdown. Actions en liste blanche uniquement.
+    pve_host : nom de l'hôte Proxmox cible (multi-hôtes) ; vide = cherche sur tous les hôtes."""
     action = (action or "").strip().lower()
     if action not in ("start", "stop", "reboot", "shutdown"):
         return f"Action '{action}' non autorisée. Autorisées : start, stop, reboot, shutdown."
-    url = creds.get("proxmox_url", "")
-    token = creds.get("proxmox_token", "")
-    secret = creds.get("proxmox_secret", "")
-    if not (url and token and secret):
-        return "Proxmox non configuré (URL/token/secret manquants)."
 
-    # Trouve le nœud ET le type (qemu/lxc) de la VM via le snapshot
+    hosts = get_proxmox_hosts(creds)
+    if not hosts:
+        return "Proxmox non configuré (URL/token/secret manquants)."
+    # Filtre sur l'hôte demandé s'il est précisé
+    if pve_host:
+        hosts = [h for h in hosts if h["name"] == pve_host]
+        if not hosts:
+            return f"Hôte Proxmox '{pve_host}' inconnu. Hôtes configurés : {', '.join(h['name'] for h in get_proxmox_hosts(creds))}"
+
+    # Trouve le nœud ET le type (qemu/lxc) de la VM via le snapshot du/des hôtes
     vm_type = None
+    url = token = secret = None
     if not node:
-        try:
-            snapshot = get_cluster_snapshot(url, token, secret)
+        last_err = None
+        for h in hosts:
+            try:
+                snapshot = get_cluster_snapshot(h["url"], h["token_id"], h["token_secret"])
+            except Exception as e:
+                last_err = f"[{h['name']}] {e}"
+                continue
             for v in snapshot["vms"]:
                 if str(v.get("vmid")) == str(vmid):
                     node = v.get("node")
                     vm_type = v.get("type")
+                    url, token, secret = h["url"], h["token_id"], h["token_secret"]
                     break
-        except Exception as e:
-            return f"Impossible de localiser la VM {vmid} : {e}"
-    if not node:
-        return f"VM {vmid} introuvable dans le cluster."
+            if node:
+                break
+        if not node:
+            return f"VM {vmid} introuvable" + (f" (dernière erreur : {last_err})" if last_err else " sur le(s) hôte(s) configuré(s).")
+    else:
+        if not hosts:
+            return "Aucun hôte Proxmox configuré."
+        url, token, secret = hosts[0]["url"], hosts[0]["token_id"], hosts[0]["token_secret"]
 
     # Type réel de la cible : lxc (conteneur) ou qemu (machine virtuelle)
     endpoint_type = "/lxc/" if vm_type == "lxc" else "/qemu/"

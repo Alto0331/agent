@@ -417,6 +417,15 @@ def load_credentials() -> dict:
                 except Exception as field_err:
                     print(f"[Credentials] ⚠️ Déchiffrement impossible pour {field} ({field_err}) ; valeur ignorée.")
                     data[field] = ""
+            # Secrets imbriqués des hôtes Proxmox multiples
+            if isinstance(data.get("proxmox_hosts"), list):
+                for h in data["proxmox_hosts"]:
+                    if isinstance(h, dict) and isinstance(h.get("token_secret"), str) and h["token_secret"]:
+                        try:
+                            h["token_secret"] = dpapi_decrypt(h["token_secret"])
+                        except Exception as host_err:
+                            print(f"[Credentials] ⚠️ Déchiffrement impossible pour proxmox_hosts[{h.get('name')}] ({host_err}) ; valeur ignorée.")
+                            h["token_secret"] = ""
             return data
         except json.JSONDecodeError as e:
             print(f"[Credentials] ⚠️ credentials.json illisible (JSON invalide : {e}) !")
@@ -444,6 +453,14 @@ def save_credentials(data: dict) -> dict:
                 current[field] = dpapi_encrypt(current[field])
             except Exception as enc_err:
                 print(f"[Avertissement] Chiffrement DPAPI impossible pour {field} ({enc_err}) ; valeur conservée telle quelle.")
+    # Secrets imbriqués des hôtes Proxmox multiples (SENSITIVE_FIELDS ne couvre que le premier niveau)
+    if isinstance(current.get("proxmox_hosts"), list):
+        for h in current["proxmox_hosts"]:
+            if isinstance(h, dict) and isinstance(h.get("token_secret"), str) and h["token_secret"] and not h["token_secret"].startswith("dpapi:"):
+                try:
+                    h["token_secret"] = dpapi_encrypt(h["token_secret"])
+                except Exception as enc_err:
+                    print(f"[Avertissement] Chiffrement DPAPI impossible pour proxmox_hosts[{h.get('name')}] ({enc_err}).")
     try:
         with open(CREDENTIALS_FILE, "w", encoding="utf-8") as f:
             json.dump(current, f, indent=2, ensure_ascii=False)
@@ -1325,12 +1342,13 @@ BRAIN_TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "proxmox_vm_action",
-            "description": "Action de contrôle sur une VM Proxmox : start, stop, reboot ou shutdown. ATTENTION : action intrusive — utilise ask_human pour faire valider l'action par l'utilisateur AVANT de l'exécuter (sauf si l'utilisateur l'a déjà explicitement demandée dans sa consigne). Après l'action, re-vérifie avec proxmox_status.",
+            "description": "Action de contrôle sur une VM ou un conteneur Proxmox : start, stop, reboot ou shutdown. ATTENTION : action intrusive — utilise ask_human pour faire valider l'action par l'utilisateur AVANT de l'exécuter (sauf si l'utilisateur l'a déjà explicitement demandée dans sa consigne). Après l'action, re-vérifie avec proxmox_status.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "vmid": {"type": "integer", "description": "ID de la VM (ex: 101)."},
+                    "vmid": {"type": "integer", "description": "ID de la VM ou du CT (ex: 101)."},
                     "action": {"type": "string", "enum": ["start", "stop", "reboot", "shutdown"], "description": "Action à exécuter."},
+                    "pve_host": {"type": "string", "description": "Nom de l'hôte Proxmox cible si plusieurs sont configurés (ex: pve1). Vide = cherche sur tous les hôtes."},
                 },
                 "required": ["vmid", "action"],
             },
@@ -1646,8 +1664,9 @@ def run_mistral_brain_loop(task: str, app_instance, use_mistral_tandem=True):
             elif fn == "proxmox_vm_action":
                 vmid = fn_args.get("vmid")
                 action = fn_args.get("action", "")
-                log_msg(f"🖥️ Action Proxmox : {action} sur VM {vmid}\n", "agent")
-                result = proxmox_monitor.vm_action(load_credentials(), vmid, action)
+                pve_host = fn_args.get("pve_host", "")
+                log_msg(f"🖥️ Action Proxmox : {action} sur VM {vmid}" + (f" (hôte {pve_host})" if pve_host else "") + "\n", "agent")
+                result = proxmox_monitor.vm_action(load_credentials(), vmid, action, pve_host=pve_host)
 
             elif fn == "generate_image":
                 log_msg(f"🎨 Génération image : {fn_args.get('description', '')[:100]}\n", "agent")
