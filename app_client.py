@@ -674,7 +674,20 @@ class AgentClientApp:
             "terra_mail_address": self.config["terra_mail_address"],
             "terra_mail_app_password": self.config["terra_mail_app_password"],
             "terra_authorized_sender": self.config["terra_authorized_sender"],
+            # Supervision Proxmox + ntfy (onglet 6)
+            "proxmox_enabled": self.config.get("proxmox_enabled", False),
+            "proxmox_url": self.config.get("proxmox_url", ""),
+            "proxmox_token": self.config.get("proxmox_token", ""),
+            "ntfy_enabled": self.config.get("ntfy_enabled", False),
+            "ntfy_url": self.config.get("ntfy_url", "https://ntfy.sh"),
+            "ntfy_topic": self.config.get("ntfy_topic", ""),
+            # Réseau (onglet 7)
+            "announce_ip": self.config.get("announce_ip", ""),
         }
+
+        # Secret Proxmox : uniquement s'il est saisi (ne jamais écraser un secret existant par une chaîne vide)
+        if self.config.get("proxmox_secret", "").strip():
+            payload["proxmox_secret"] = self.config["proxmox_secret"].strip()
 
         if self.connected and self.sock:
             self._send_json(payload)
