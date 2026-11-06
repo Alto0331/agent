@@ -517,6 +517,34 @@ class AgentClientApp:
         tk.Entry(g_nt, textvariable=self.var_ntfy_topic, bg="#0f172a", fg="white", insertbackground="white", relief=tk.FLAT).grid(row=1, column=1, sticky="ew", padx=6, pady=2, ipady=2)
         g_nt.columnconfigure(1, weight=1)
 
+        # --- Watchdog de services (site web -> VM liée -> redémarrage) ---
+        tk.Label(tab_superv, text="🔁 Services surveillés (watchdog) : liste JSON",
+            fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(8, 2))
+
+        tk.Label(tab_superv, text=("Format : [{name, check: http|tcp, url ou target, expected_status,\n"
+                  "pve_host, vmid, auto_restart}] — ex : redémarre la VM 101 de pve1 si le site ne répond plus."),
+            fg="#94a3b8", bg="#1e293b", justify=tk.LEFT, font=("Segoe UI", 7)).pack(anchor="w", pady=(0, 4))
+
+        self.txt_watched_services = tk.Text(
+            tab_superv, bg="#0f172a", fg="white", insertbackground="white",
+            relief=tk.FLAT, font=("Consolas", 8), height=6, wrap=tk.WORD
+        )
+        self.txt_watched_services.pack(fill=tk.X, pady=(0, 4))
+        try:
+            self.txt_watched_services.insert("1.0", json.dumps(self.config.get("watched_services", []), ensure_ascii=False, indent=2))
+        except Exception:
+            self.txt_watched_services.insert("1.0", "[]")
+
+        g_wd = tk.Frame(tab_superv, bg="#1e293b")
+        g_wd.pack(fill=tk.X)
+        tk.Label(g_wd, text="Intervalle (min) :", fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w", pady=2)
+        self.var_watchdog_interval = tk.StringVar(value=str(self.config.get("watchdog_interval_min", 5)))
+        tk.Entry(g_wd, textvariable=self.var_watchdog_interval, width=6, bg="#0f172a", fg="white", insertbackground="white", relief=tk.FLAT).grid(row=0, column=1, sticky="w", padx=6, pady=2, ipady=2)
+        tk.Label(g_wd, text="Email d'alerte :", fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8)).grid(row=0, column=2, sticky="w", pady=2, padx=(12, 0))
+        self.var_alert_email = tk.StringVar(value=self.config.get("alert_email", ""))
+        tk.Entry(g_wd, textvariable=self.var_alert_email, bg="#0f172a", fg="white", insertbackground="white", relief=tk.FLAT).grid(row=0, column=3, sticky="ew", padx=6, pady=2, ipady=2)
+        g_wd.columnconfigure(3, weight=1)
+
         tk.Label(tab_superv, text=("💡 Token ID complet requis : root@pam!nomDuToken (utilisateur@realm!nom, tout collé)\n"
                   "    — Proxmox → Datacenter → Permissions → API Tokens. Copie bien l'UUID Secret généré.\n"
                   "    — URL : le port 8006 est ajouté automatiquement si absent (ex : 192.168.1.10 suffit)\n"
@@ -624,6 +652,22 @@ class AgentClientApp:
         # 7. Réseau
         self.config["announce_ip"] = self.var_announce_ip.get().strip()
 
+        # 8. Watchdog de services — validation JSON stricte avant synchronisation
+        raw_services = self.txt_watched_services.get("1.0", "end").strip()
+        try:
+            parsed_services = json.loads(raw_services) if raw_services else []
+            if not isinstance(parsed_services, list):
+                raise ValueError("le JSON doit être une liste [...]")
+        except Exception as e:
+            self.append_log(f"❌ Services surveillés : JSON invalide ({e}) — paramètres NON synchronisés.\n", "error")
+            return
+        self.config["watched_services"] = parsed_services
+        try:
+            self.config["watchdog_interval_min"] = max(1, int(self.var_watchdog_interval.get() or "5"))
+        except ValueError:
+            self.config["watchdog_interval_min"] = 5
+        self.config["alert_email"] = self.var_alert_email.get().strip()
+
         # 3. Modèle Local Ollama
         self.config["use_ollama"] = bool(self.var_use_ollama.get())
         self.config["ollama_url"] = self.var_ollama_url.get().strip() or "http://localhost:11434"
@@ -688,6 +732,10 @@ class AgentClientApp:
             "ntfy_topic": self.config.get("ntfy_topic", ""),
             # Réseau (onglet 7)
             "announce_ip": self.config.get("announce_ip", ""),
+            # Watchdog de services (onglet 6)
+            "watched_services": self.config.get("watched_services", []),
+            "watchdog_interval_min": self.config.get("watchdog_interval_min", 5),
+            "alert_email": self.config.get("alert_email", ""),
         }
 
         # Secret Proxmox : uniquement s'il est saisi (ne jamais écraser un secret existant par une chaîne vide)

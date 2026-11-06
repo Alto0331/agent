@@ -2,6 +2,8 @@
 import sys
 import subprocess
 import socket
+import urllib.request
+import urllib.error
 import json
 import threading
 import time
@@ -1658,6 +1660,7 @@ def run_mistral_brain_loop(task: str, app_instance, use_mistral_tandem=True):
                 log_msg("🖥️ Vérification Proxmox en cours...\n", "agent")
                 creds = load_credentials()
                 report, issues = proxmox_monitor.check_and_report(creds, notify_ntfy=True)
+                report += _watchdog_services_summary()
                 log_msg(report + "\n", "system")
                 result = "RAPPORT PROXMOX :\n" + report
 
@@ -1728,6 +1731,216 @@ def brain_generate_image(path: str, description: str, width: int = 1200, height:
         )
     except Exception as e:
         return f"Erreur génération image : {e}"
+
+
+# ==============================================================================
+# WATCHDOG DE SERVICES (site web -> VM liée -> redémarrage automatique)
+# ==============================================================================
+_WATCHDOG_STATE = {
+    "fail_counts": {},    # nom du service -> nb d'échecs consécutifs
+    "last_status": {},    # nom du service -> "up" / "down"
+    "action_times": {},   # "pve_host:vmid" -> [timestamps des actions]
+    "services": [],       # derniers états connus (pour le dashboard)
+}
+
+
+def _check_http_service(url: str, expected_status: int = 200, timeout: int = 10):
+    """Check HTTP : suit les redirections, compare le statut final à l'attendu."""
+    req = urllib.request.Request(url, headers={"User-Agent": "AgentVM-Watchdog/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        ok = (resp.status == int(expected_status or 200))
+        return ok, f"HTTP {resp.status}"
+
+
+def _check_tcp_service(target: str, timeout: int = 5):
+    """Check TCP : host:port joignable."""
+    target = (target or "").strip()
+    if ":" not in target:
+        return False, "cible TCP invalide (format host:port)"
+    host, port = target.rsplit(":", 1)
+    socket.create_connection((host, int(port)), timeout=timeout)
+    return True, "TCP OK"
+
+
+def _watchdog_notify(creds: dict, title: str, message: str, priority: str = "high", tags: str = "warning"):
+    """Notifie par tous les canaux disponibles : ntfy, app PC, interface web, email (si alert_email)."""
+    try:
+        if creds.get("ntfy_enabled") and creds.get("ntfy_topic"):
+            proxmox_monitor.send_ntfy(creds.get("ntfy_url"), creds.get("ntfy_topic"),
+                                       title, message, priority=priority, tags=tags)
+    except Exception:
+        pass
+    try:
+        inst = RemoteAppInstance(conn=None)
+        inst.log(f"🔁 [Watchdog] {title}\n{message}\n", "system")
+    except Exception:
+        pass
+    try:
+        import web_app
+        web_app.HUB.append_log(f"🔁 [Watchdog] {title}\n{message}\n", "system")
+    except Exception:
+        pass
+    try:
+        alert_email = (creds.get("alert_email") or "").strip()
+        if alert_email:
+            threading.Thread(
+                target=MAIL_WATCHER.send_email,
+                args=(alert_email, f"Agent VM — {title}", message),
+                daemon=True
+            ).start()
+    except Exception:
+        pass
+
+
+def _watchdog_services_summary() -> str:
+    """Résumé textuel de l'état des services surveillés (pour rapports)."""
+    st = _WATCHDOG_STATE
+    if not st["services"]:
+        return ""
+    lines = ["\n📡 SERVICES SURVEILLÉS :"]
+    for s in st["services"]:
+        icon = "✅" if s.get("status") == "up" else "❌"
+        lines.append(f"  {icon} {s.get('name', '?')} : {s.get('status', '?')}" +
+                     (f" ({s.get('detail')})" if s.get("detail") else ""))
+    return "\n".join(lines)
+
+
+def _watchdog_check_one(creds: dict, svc: dict):
+    """Vérifie un service et applique la remédiation si nécessaire (anti-flapping + cooldown)."""
+    name = (svc.get("name") or "?").strip()
+    check = (svc.get("check") or "http").strip().lower()
+    st = _WATCHDOG_STATE
+    ok, detail = False, ""
+    try:
+        if check == "tcp":
+            ok, detail = _check_tcp_service(svc.get("target", ""), timeout=5)
+        else:
+            ok, detail = _check_http_service(svc.get("url", ""), int(svc.get("expected_status") or 200), timeout=10)
+    except Exception as e:
+        ok, detail = False, str(e)[:80]
+
+    # Enregistre l'état pour le dashboard
+    st["services"] = [s for s in st["services"] if s.get("name") != name]
+    st["services"].append({"name": name, "status": "up" if ok else "down",
+                           "detail": detail, "last_check": time.time()})
+
+    if ok:
+        was_down = st["last_status"].get(name) == "down"
+        st["fail_counts"][name] = 0
+        st["last_status"][name] = "up"
+        if was_down:
+            _watchdog_notify(creds, f"✅ Service rétabli : {name}",
+                             f"Le service {name} répond à nouveau ({detail}).",
+                             priority="default", tags="white_check_mark")
+        return
+
+    # Échec : anti-flapping — n'agit qu'au 2e échec CONSÉCUTIF
+    st["fail_counts"][name] = st["fail_counts"].get(name, 0) + 1
+    st["last_status"][name] = "down"
+    if st["fail_counts"][name] < 2:
+        return
+
+    vmid = svc.get("vmid")
+    pve_host = (svc.get("pve_host") or "").strip()
+    auto_restart = bool(svc.get("auto_restart"))
+
+    if not vmid:
+        _watchdog_notify(creds, f"🚨 Service KO : {name} ({detail})",
+                         f"Le service {name} est en panne. Aucune VM associée : vérifie manuellement.",
+                         priority="high", tags="rotating_light")
+        return
+
+    if not auto_restart:
+        _watchdog_notify(creds, f"🚨 Service KO : {name} ({detail})",
+                         f"Le service {name} est en panne. Redémarrage automatique désactivé pour la VM {vmid}.",
+                         priority="high", tags="rotating_light")
+        return
+
+    # Cooldown par vmid : 1 action max / 15 min, 3 max / heure
+    key = f"{pve_host}:{vmid}"
+    now = time.time()
+    times = st["action_times"].setdefault(key, [])
+    times[:] = [t for t in times if now - t < 3600]
+    if any(now - t < 900 for t in times):
+        return  # moins de 15 min depuis la dernière action sur cette VM
+    if len(times) >= 3:
+        _watchdog_notify(creds, f"⛔ Watchdog : {name} toujours KO",
+                         f"Limite de 3 actions/heure atteinte pour la VM {vmid} — intervention manuelle requise.",
+                         priority="urgent", tags="no_entry")
+        return
+
+    # Résolution : statut réel de la VM via le snapshot
+    vm_status = None
+    try:
+        hosts = proxmox_monitor.get_proxmox_hosts(creds)
+        target_hosts = [h for h in hosts if h["name"] == pve_host] if pve_host else hosts
+        for h in target_hosts:
+            snap = proxmox_monitor.get_cluster_snapshot(h["url"], h["token_id"], h["token_secret"])
+            for v in snap["vms"]:
+                if str(v.get("vmid")) == str(vmid):
+                    vm_status = v.get("status")
+                    break
+            if vm_status:
+                break
+    except Exception as e:
+        _watchdog_notify(creds, f"⚠️ Watchdog {name} : service KO, Proxmox injoignable",
+                         f"Service {name} en panne ({detail}) mais impossible d'interroger Proxmox : {e}",
+                         priority="urgent", tags="rotating_light")
+        return
+
+    # Remédiation : VM arrêtée -> start ; VM running mais service KO -> reboot
+    action = "start" if vm_status != "running" else "reboot"
+    res = proxmox_monitor.vm_action(creds, vmid, action, pve_host=pve_host)
+    times.append(now)
+    _watchdog_notify(creds, f"🔄 Watchdog : redémarrage de la VM {vmid}",
+                     f"Service {name} KO ({detail}) — VM {vm_status or 'introuvable'} → action '{action}'. {res}",
+                     priority="high", tags="arrows_counterclockwise")
+
+    # Re-check 90 s après l'action
+    threading.Timer(90.0, lambda: _watchdog_recheck(creds, svc, name, detail)).start()
+
+
+def _watchdog_recheck(creds: dict, svc: dict, name: str, fail_detail: str):
+    """Re-vérifie 90 s après une action : rétabli ou escalade."""
+    try:
+        check = (svc.get("check") or "http").strip().lower()
+        if check == "tcp":
+            ok, detail = _check_tcp_service(svc.get("target", ""), timeout=5)
+        else:
+            ok, detail = _check_http_service(svc.get("url", ""), int(svc.get("expected_status") or 200), timeout=10)
+        if ok:
+            _WATCHDOG_STATE["last_status"][name] = "up"
+            _WATCHDOG_STATE["fail_counts"][name] = 0
+            _watchdog_notify(creds, f"✅ Service rétabli : {name}",
+                             f"Le service {name} fonctionne à nouveau après redémarrage ({detail}).",
+                             priority="default", tags="white_check_mark")
+        else:
+            _watchdog_notify(creds, f"🚨 ÉCHEC PERSISTANT : {name}",
+                             f"Le service {name} est TOUJOURS en panne après redémarrage de la VM "
+                             f"({fail_detail} puis {detail}). Intervention manuelle requise.",
+                             priority="urgent", tags="rotating_light")
+    except Exception:
+        pass
+
+
+def _service_watchdog_loop():
+    """Boucle de surveillance des services : toutes les watchdog_interval_min minutes (défaut 5).
+    Aucun appel de LLM : 0 token dépensé. try/except par service et par hôte."""
+    while True:
+        interval = 300
+        try:
+            creds = load_credentials()
+            interval = max(60, int(creds.get("watchdog_interval_min") or 5) * 60)
+            if creds.get("proxmox_enabled"):
+                services = creds.get("watched_services") or []
+                for svc in services:
+                    try:
+                        _watchdog_check_one(creds, svc)
+                    except Exception as e:
+                        print(f"[Watchdog] Erreur sur le service {svc.get('name', '?')} : {e}")
+        except Exception as e:
+            print(f"[Watchdog] Erreur boucle : {e}")
+        time.sleep(interval)
 
 
 def _proxmox_monitor_loop():
@@ -2073,6 +2286,7 @@ if __name__ == "__main__":
     threading.Thread(target=MAIL_WATCHER.watch_loop, daemon=True).start()
     threading.Thread(target=_watchdog_loop, daemon=True).start()
     threading.Thread(target=_proxmox_monitor_loop, daemon=True).start()
+    threading.Thread(target=_service_watchdog_loop, daemon=True).start()
 
     try:
         import web_app
@@ -2106,6 +2320,7 @@ if __name__ == "__main__":
             missions_html_fn=_missions_html,
             proxmox_report_html_fn=lambda: proxmox_monitor.load_last_report().replace("<", "&lt;"),
             network_ips_fn=get_all_local_ips,
+            watchdog_services_fn=lambda: list(_WATCHDOG_STATE.get("services", [])),
         )
     except Exception as e:
         print(f"[WebApp] ⚠️ Interface web non disponible : {e}")

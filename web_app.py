@@ -294,6 +294,9 @@ class Handler(BaseHTTPRequestHandler):
                 "ntfy_url": creds.get("ntfy_url", "https://ntfy.sh"),
                 "ntfy_topic": creds.get("ntfy_topic", ""),
                 "announce_ip": creds.get("announce_ip", ""),
+                "watched_services": json.dumps(creds.get("watched_services", []), ensure_ascii=False, indent=2),
+                "watchdog_interval_min": creds.get("watchdog_interval_min", 5),
+                "alert_email": creds.get("alert_email", ""),
             })
 
         if u.path == "/api/sessions":
@@ -317,7 +320,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 import proxmox_monitor
                 creds = HUB.hooks["load_credentials"]()
-                return self._json(proxmox_monitor.get_dashboard_data(creds))
+                data = proxmox_monitor.get_dashboard_data(creds)
+                data["services"] = HUB.hooks.get("watchdog_services_fn", lambda: [])()
+                return self._json(data)
             except Exception as e:
                 return self._json({"ok": False, "error": str(e)})
 
@@ -411,6 +416,7 @@ class Handler(BaseHTTPRequestHandler):
                 "main_account_email", "main_account_password",
                 "proxmox_enabled", "proxmox_url", "proxmox_token", "proxmox_secret",
                 "ntfy_enabled", "ntfy_url", "ntfy_topic", "announce_ip",
+                "watched_services", "watchdog_interval_min", "alert_email",
             ]
             payload = {k: v for k, v in data.items() if k in allowed and v != ""}
             try:
@@ -424,6 +430,9 @@ class Handler(BaseHTTPRequestHandler):
                 import proxmox_monitor
                 creds = HUB.hooks["load_credentials"]()
                 report, issues = proxmox_monitor.check_and_report(creds, notify_ntfy=True)
+                for s in HUB.hooks.get("watchdog_services_fn", lambda: [])():
+                    icon = "✅" if s.get("status") == "up" else "❌"
+                    report += f"\n{icon} Service {s.get('name', '?')} : {s.get('status', '?')}"
                 HUB.append_log("🖥️ [Proxmox — vérification manuelle]\n" + report + "\n", "system")
                 return self._json({"ok": True, "report": report, "issues_count": len(issues)})
             except Exception as e:
@@ -460,7 +469,7 @@ def start_server(start_task, make_instance, load_credentials, save_credentials,
                  load_trusted_senders, save_trusted_senders,
                  has_mistral_fn=None, has_openrouter_fn=None, queue_len_fn=None,
                  missions_html_fn=None, on_web_complete=None, apply_credentials_sync=None,
-                 proxmox_report_html_fn=None, network_ips_fn=None):
+                 proxmox_report_html_fn=None, network_ips_fn=None, watchdog_services_fn=None):
     """Lancé par agent_server.py dans un thread daemon."""
     HUB.hooks = {
         "start_task": start_task,
@@ -476,6 +485,7 @@ def start_server(start_task, make_instance, load_credentials, save_credentials,
         "missions_html": missions_html_fn or (lambda: ""),
         "proxmox_report_html": proxmox_report_html_fn or (lambda: ""),
         "network_ips_fn": network_ips_fn or (lambda: []),
+        "watchdog_services_fn": watchdog_services_fn or (lambda: []),
         "on_web_complete": on_web_complete,
     }
     try:

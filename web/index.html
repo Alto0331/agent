@@ -344,6 +344,14 @@ async function openSettings(){
   <label>Serveur ntfy</label><input id="set-ntfy-url" class="txt" placeholder="https://ntfy.sh">
   <label>Topic</label><input id="set-ntfy-topic" class="txt" placeholder="mon-topic-secret-vm">
   <p class="mut" style="margin-top:6px">📱 Abonne-toi au topic dans l'app ntfy pour recevoir les alertes sur ton téléphone.</p>
+  <h2>🔁 Watchdog de services</h2>
+  <label>Services surveillés (JSON)</label>
+  <textarea id="set-watched-services" class="txt" style="min-height:90px;font-size:12px;font-family:monospace" placeholder='[{"name":"Site vitrine","check":"http","url":"https://monsite.fr","vmid":101,"pve_host":"pve1","auto_restart":true}]'></textarea>
+  <label>Intervalle de vérification (minutes)</label>
+  <input id="set-watchdog-interval" class="txt" type="number" min="1" value="5">
+  <label>Email d'alerte (optionnel, pour les échecs persistants)</label>
+  <input id="set-alert-email" class="txt" placeholder="ton@email.com">
+  <p class="mut" style="margin-top:4px">Le watchdog redémarre automatiquement la VM liée à un service en panne (2 échecs consécutifs, 1 action/15 min max).</p>
   <h2>🌐 Réseau</h2>
   <label>Adresse IP annoncée (vide = auto)</label><input id="set-announce-ip" class="txt" placeholder="ex : 100.x.x.x (IP Tailscale de la VM)">
   <div id="netInfo" class="card" style="font-size:12px;line-height:1.7"></div>
@@ -362,6 +370,9 @@ async function openSettings(){
   $('set-ntfy-url').value=s.ntfy_url||'https://ntfy.sh';
   $('set-ntfy-topic').value=s.ntfy_topic||'';
   $('set-announce-ip').value=s.announce_ip||'';
+  $('set-watched-services').value=s.watched_services||'[]';
+  $('set-watchdog-interval').value=s.watchdog_interval_min||5;
+  $('set-alert-email').value=s.alert_email||'';
   api('network').then(function(n){
     var box=document.getElementById('netInfo');if(!box)return;box.innerHTML='';
     var add=function(t,ok){var p=document.createElement('div');if(ok)p.style.color='#10b981';p.textContent=t;box.appendChild(p);};
@@ -460,6 +471,17 @@ async function openProblems(){
     const ul=document.createElement('ul');ul.style.cssText='margin:6px 0 0 18px;color:var(--mut)';
     for(const s of i.solutions){const li=document.createElement('li');li.textContent=s;ul.appendChild(li);}
     div.appendChild(ul);c.appendChild(div);}
+  if(d.services&&d.services.length){
+    const hs=document.createElement('h2');hs.textContent='📡 Services surveillés';c.appendChild(hs);
+    for(const s of d.services){
+      const card=document.createElement('div');card.className='pxnode';
+      const nm=document.createElement('div');nm.className='name';
+      const st=document.createElement('span');st.textContent=s.status==='up'?'✅':'❌';
+      st.style.fontSize='15px';nm.appendChild(st);
+      nm.appendChild(document.createTextNode(' '+s.name));
+      const dt=document.createElement('span');dt.style.cssText='margin-left:auto;font-size:10.5px;color:var(--mut)';
+      dt.textContent=s.detail||s.status;nm.appendChild(dt);
+      card.appendChild(nm);c.appendChild(card);}}
   const b2=document.createElement('button');b2.className='btn';b2.style.marginTop='6px';
   b2.textContent='Actualiser';b2.onclick=openProblems;c.appendChild(b2);
   const mh=document.createElement('h2');mh.textContent='🧭 Missions récentes';c.appendChild(mh);
@@ -521,6 +543,14 @@ async function saveAll(){
     ntfy_url:$('set-ntfy-url').value,
     ntfy_topic:$('set-ntfy-topic').value,
     announce_ip:$('set-announce-ip').value};
+  try{
+    const ws=$('set-watched-services').value.trim();
+    payload.watched_services=ws?JSON.parse(ws):[];
+  }catch(e){
+    toast('JSON services invalide : '+e.message,false);
+    return;}
+  payload.watchdog_interval_min=parseInt($('set-watchdog-interval').value)||5;
+  payload.alert_email=$('set-alert-email').value;
   const g=id=>$(id).value.trim();
   if(g('set-orkey'))payload.openrouter_key=g('set-orkey');
   if(g('set-mistralkey'))payload.mistral_api_key=g('set-mistralkey');
