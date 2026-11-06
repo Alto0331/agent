@@ -35,13 +35,39 @@ def init(base_dir):
 # CLIENT API PROXMOX
 # ==============================================================================
 
-def _api_request(url: str, token: str, secret: str, method: str = "GET", data=None, timeout: int = 20) -> dict:
-    """Appel API Proxmox. Retourne le dict 'data' ou lève une exception explicite."""
+def normalize_proxmox_url(url: str) -> str:
+    """Normalise l'URL Proxmox : ajoute https:// si schéma absent, :8006 si port absent."""
     base = (url or "").strip().rstrip("/")
     if not base:
         raise ValueError("URL Proxmox non configurée")
     if not base.startswith("http"):
         base = "https://" + base
+    # Port manquant -> 8006 (port API par défaut de Proxmox VE)
+    import re as _re
+    m = _re.match(r"^(https?://)([^/:]+)$", base)
+    if m:
+        base = m.group(1) + m.group(2) + ":8006"
+    return base
+
+
+def validate_proxmox_credentials(token: str, secret: str):
+    """Valide le format du token ID et du secret. Lève ValueError avec un message clair en français."""
+    token = (token or "").strip()
+    if not token:
+        raise ValueError("Token ID vide : il faut l'ID complet, ex. root@pam!nomduToken")
+    if "@" not in token or "!" not in token:
+        raise ValueError(
+            "Token ID incomplet : il faut l'ID complet, ex. root@pam!nomduToken "
+            "(utilisateur@realm!nomDuToken, tout collé)"
+        )
+    if not (secret or "").strip():
+        raise ValueError("Secret du token vide : copie l'UUID secret généré à la création du token")
+
+
+def _api_request(url: str, token: str, secret: str, method: str = "GET", data=None, timeout: int = 20) -> dict:
+    """Appel API Proxmox. Retourne le dict 'data' ou lève une exception explicite."""
+    validate_proxmox_credentials(token, secret)
+    base = normalize_proxmox_url(url)
     path = data.get("path", "") if isinstance(data, dict) else ""
     body = json.dumps(data.get("body", {})).encode() if isinstance(data, dict) and data.get("body") else None
     req = urllib.request.Request(base + "/api2/json" + path, data=body, method=method)
