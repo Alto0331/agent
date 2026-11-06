@@ -518,6 +518,29 @@ class AgentClientApp:
         tk.Entry(g_nt, textvariable=self.var_ntfy_topic, bg="#0f172a", fg="white", insertbackground="white", relief=tk.FLAT).grid(row=1, column=1, sticky="ew", padx=6, pady=2, ipady=2)
         g_nt.columnconfigure(1, weight=1)
 
+        # --- Mise à jour automatique des VMs Debian ---
+        tk.Label(tab_superv, text="🔄 Mise à jour automatique des VMs Debian",
+            fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(8, 2))
+
+        self.var_auto_update_enabled = tk.BooleanVar(value=self.config.get("auto_update_enabled", False))
+        tk.Checkbutton(tab_superv, text="Mettre à jour toutes les VMs Debian chaque nuit (snapshot → apt → vérification → rollback si problème)",
+            variable=self.var_auto_update_enabled, bg="#1e293b", fg="#10b981", selectcolor="#0f172a",
+            activebackground="#1e293b", activeforeground="#10b981", font=("Segoe UI", 8),
+            wraplength=430, justify=tk.LEFT).pack(anchor="w")
+
+        g_au = tk.Frame(tab_superv, bg="#1e293b")
+        g_au.pack(fill=tk.X)
+        tk.Label(g_au, text="Heure (HH:MM) :", fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w", pady=2)
+        self.var_auto_update_time = tk.StringVar(value=self.config.get("auto_update_time", "00:00"))
+        tk.Entry(g_au, textvariable=self.var_auto_update_time, width=7, bg="#0f172a", fg="white", insertbackground="white", relief=tk.FLAT).grid(row=0, column=1, sticky="w", padx=6, pady=2, ipady=2)
+        tk.Label(g_au, text="VMs à ignorer (IDs, virgules) :", fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8)).grid(row=0, column=2, sticky="w", pady=2, padx=(10, 0))
+        self.var_update_blacklist = tk.StringVar(value=",".join(str(x) for x in self.config.get("update_blacklist", [])))
+        tk.Entry(g_au, textvariable=self.var_update_blacklist, bg="#0f172a", fg="white", insertbackground="white", relief=tk.FLAT).grid(row=0, column=3, sticky="ew", padx=6, pady=2, ipady=2)
+        g_au.columnconfigure(3, weight=1)
+
+        tk.Label(tab_superv, text="💡 Nécessite le qemu-guest-agent dans les VMs (préinstallé sur la plupart des Debian).",
+            fg="#94a3b8", bg="#1e293b", justify=tk.LEFT, font=("Segoe UI", 7)).pack(anchor="w", pady=(2, 0))
+
         # --- Watchdog de services (site web -> VM liée -> redémarrage) ---
         tk.Label(tab_superv, text="🔁 Services surveillés (watchdog) : liste JSON",
             fg="#cbd5e1", bg="#1e293b", font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(8, 2))
@@ -728,6 +751,11 @@ class AgentClientApp:
             self.config["watchdog_interval_min"] = 5
         self.config["alert_email"] = self.var_alert_email.get().strip()
 
+        # 9. Mise à jour automatique des VMs Debian
+        self.config["auto_update_enabled"] = bool(self.var_auto_update_enabled.get())
+        self.config["auto_update_time"] = self.var_auto_update_time.get().strip() or "00:00"
+        self.config["update_blacklist"] = [b.strip() for b in self.var_update_blacklist.get().split(",") if b.strip()]
+
         # 3. Modèle Local Ollama
         self.config["use_ollama"] = bool(self.var_use_ollama.get())
         self.config["ollama_url"] = self.var_ollama_url.get().strip() or "http://localhost:11434"
@@ -796,6 +824,10 @@ class AgentClientApp:
             "watched_services": self.config.get("watched_services", []),
             "watchdog_interval_min": self.config.get("watchdog_interval_min", 5),
             "alert_email": self.config.get("alert_email", ""),
+            # Mise à jour automatique des VMs Debian
+            "auto_update_enabled": self.config.get("auto_update_enabled", False),
+            "auto_update_time": self.config.get("auto_update_time", "00:00"),
+            "update_blacklist": self.config.get("update_blacklist", []),
         }
 
         # Secret Proxmox : uniquement s'il est saisi (ne jamais écraser un secret existant par une chaîne vide)

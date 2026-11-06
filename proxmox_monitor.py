@@ -367,6 +367,208 @@ def get_proxmox_hosts(creds: dict) -> list:
     return hosts
 
 
+# ==============================================================================
+# GUEST-AGENT : exécuter des commandes DANS les VMs (via l'API Proxmox)
+# ==============================================================================
+
+def guest_exec(creds: dict, vmid: int, command: str, pve_host: str = "", timeout: int = 300) -> tuple:
+    """Exécute une commande dans une VM via le qemu-guest-agent.
+    Retourne (exit_code, sortie). Lève une exception claire si l'agent est absent."""
+    import time as _time
+    creds = creds or {}
+    hosts = get_proxmox_hosts(creds)
+    if pve_host:
+        hosts = [h for h in hosts if h["name"] == pve_host]
+    if not hosts:
+        raise ValueError("Aucun hôte Proxmox configuré.")
+
+    h = hosts[0]
+    url, token, secret = h["url"], h["token_id"], h["token_secret"]
+    # Localise la VM (nœud)
+    snapshot = get_cluster_snapshot(url, token, secret)
+    node = vm_type = None
+    for v in snapshot["vms"]:
+        if str(v.get("vmid")) == str(vmid):
+            node, vm_type = v.get("node"), v.get("type")
+            break
+    if not node:
+        raise ValueError(f"VM {vmid} introuvable.")
+    if vm_type == "lxc":
+        raise ValueError(f"VM {vmid} est un conteneur LXC : le guest-agent ne s'applique qu'aux VMs qemu.")
+
+    base = f"/nodes/{node}/qemu/{vmid}/agent"
+    # Lance la commande
+    resp = _api_request(url, token, secret, method="POST",
+                        data={"path": base + "/exec", "body": {"command": "/bin/bash", "arg": ["-c", command]}})
+    pid = resp.get("pid")
+    if not pid:
+        raise ValueError(f"Le guest-agent de la VM {vmid} n'a pas répondu (agent absent ou non installé ?).")
+    # Attend la fin (poll du statut)
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        _time.sleep(2)
+        try:
+            st = _api_request(url, token, secret, data={"path": base + f"/exec-status?pid={pid}"})
+        except Exception:
+            continue
+        if st.get("exited"):
+            out = st.get("out", "") or ""
+            err = st.get("err", "") or ""
+            return int(st.get("exitcode", -1)), (out + ("\n" + err if err else "")).strip()
+    raise TimeoutError(f"La commande dans la VM {vmid} n'a pas terminé en {timeout}s.")
+
+
+def snapshot_vm(creds: dict, vmid: int, snapname: str, pve_host: str = "") -> str:
+    """Crée un snapshot de la VM (avec état RAM) avant une opération risquée."""
+    hosts = get_proxmox_hosts(creds)
+    if pve_host:
+        hosts = [h for h in hosts if h["name"] == pve_host]
+    h = hosts[0]
+    snapshot = get_cluster_snapshot(h["url"], h["token_id"], h["token_secret"])
+    node = None
+    for v in snapshot["vms"]:
+        if str(v.get("vmid")) == str(vmid):
+            node = v.get("node")
+            break
+    if not node:
+        raise ValueError(f"VM {vmid} introuvable.")
+    _api_request(h["url"], h["token_id"], h["token_secret"], method="POST",
+                 data={"path": f"/nodes/{node}/qemu/{vmid}/snapshot/{snapname}", "body": {"vmstate": 1, "description": "Snapshot automatique avant mise à jour"}})
+    return snapname
+
+
+def rollback_vm(creds: dict, vmid: int, snapname: str, pve_host: str = "") -> str:
+    """Restaure la VM à son snapshot (rollback après échec de mise à jour)."""
+    hosts = get_proxmox_hosts(creds)
+    if pve_host:
+        hosts = [h for h in hosts if h["name"] == pve_host]
+    h = hosts[0]
+    snapshot = get_cluster_snapshot(h["url"], h["token_id"], h["token_secret"])
+    node = None
+    for v in snapshot["vms"]:
+        if str(v.get("vmid")) == str(vmid):
+            node = v.get("node")
+            break
+    if not node:
+        raise ValueError(f"VM {vmid} introuvable.")
+    _api_request(h["url"], h["token_id"], h["token_secret"], method="POST",
+                 data={"path": f"/nodes/{node}/qemu/{vmid}/snapshot/{snapname}/rollback", "body": {}})
+    return f"Rollback de la VM {vmid} vers {snapname} lancé."
+
+
+def is_debian_vm(creds: dict, vmid: int, pve_host: str = "") -> bool:
+    """True si la VM est un Linux Debian/Ubuntu avec guest-agent fonctionnel."""
+    try:
+        code, out = guest_exec(creds, vmid, "cat /etc/os-release", pve_host=pve_host, timeout=30)
+        return code == 0 and ("debian" in out.lower() or "ubuntu" in out.lower())
+    except Exception:
+        return False
+
+
+def update_debian_vm(creds: dict, vmid: int, pve_host: str = "") -> str:
+    """Met à jour une VM Debian/Ubuntu (apt update + upgrade non interactif).
+    Retourne un résumé de la sortie apt."""
+    cmd = ("export DEBIAN_FRONTEND=noninteractive; "
+           "apt-get update -qq && apt-get upgrade -y -qq -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' "
+           "&& echo UPDATE_OK || echo UPDATE_FAIL")
+    code, out = guest_exec(creds, vmid, cmd, pve_host=pve_host, timeout=1800)
+    tail = "\n".join(out.strip().split("\n")[-8:])
+    if "UPDATE_OK" in out:
+        return f"✅ VM {vmid} mise à jour.\n{tail}"
+    return f"❌ VM {vmid} : échec apt (exit {code}).\n{tail}"
+
+
+def update_all_vms(creds: dict, batch_size: int = 3, blacklist: list = None,
+                   progress_fn=None) -> dict:
+    """Orchestrateur de mise à jour de toutes les VMs Debian/Ubuntu :
+    snapshot -> batch de N -> vérification -> batch suivant ; rollback si échec.
+    progress_fn(message) est appelé pour suivre l'avancement (optionnel).
+    Retourne un résumé {updated: [], failed: [], rolled_back: [], skipped: []}."""
+    import time as _time
+    blacklist = [str(b) for b in (blacklist or [])]
+    result = {"updated": [], "failed": [], "rolled_back": [], "skipped": []}
+    hosts = get_proxmox_hosts(creds)
+    if not hosts:
+        raise ValueError("Aucun hôte Proxmox configuré.")
+
+    # Collecte les VMs qemu running sur tous les hôtes
+    candidates = []
+    for h in hosts:
+        try:
+            snap = get_cluster_snapshot(h["url"], h["token_id"], h["token_secret"])
+        except Exception as e:
+            if progress_fn:
+                progress_fn(f"⚠️ Hôte {h['name']} injoignable : {e}")
+            continue
+        for v in snap["vms"]:
+            if v.get("type") == "qemu" and v.get("status") == "running" and str(v.get("vmid")) not in blacklist:
+                candidates.append({"vmid": v["vmid"], "host": h["name"]})
+    if progress_fn:
+        progress_fn(f"🔍 {len(candidates)} VM(s) candidate(s) à la mise à jour (qemu running, hors blacklist).")
+
+    # Traite par batches
+    for i in range(0, len(candidates), max(1, batch_size)):
+        batch = candidates[i:i + max(1, batch_size)]
+        for vm in batch:
+            vmid, host = vm["vmid"], vm["host"]
+            tag = f"[{host}] VM {vmid}"
+            # Debian/Ubuntu avec guest-agent ?
+            if not is_debian_vm(creds, vmid, pve_host=host):
+                result["skipped"].append(tag + " (pas Debian ou guest-agent absent)")
+                if progress_fn:
+                    progress_fn(f"⏭️ {tag} : ignorée (pas Debian/Ubuntu ou guest-agent absent)")
+                continue
+            # Snapshot de sécurité
+            snapname = "pre-update-" + _time.strftime("%Y%m%d-%H%M")
+            try:
+                snapshot_vm(creds, vmid, snapname, pve_host=host)
+                if progress_fn:
+                    progress_fn(f"📸 {tag} : snapshot {snapname} créé")
+            except Exception as e:
+                result["failed"].append(tag + f" (snapshot impossible : {e})")
+                if progress_fn:
+                    progress_fn(f"❌ {tag} : snapshot impossible ({e}) — VM non touchée")
+                continue
+            # Mise à jour
+            try:
+                res = update_debian_vm(creds, vmid, pve_host=host)
+            except Exception as e:
+                res = f"❌ VM {vmid} : {e}"
+            if res.startswith("✅"):
+                # Vérification post-update : la VM répond toujours ?
+                try:
+                    code, _ = guest_exec(creds, vmid, "uptime", pve_host=host, timeout=60)
+                    if code == 0:
+                        result["updated"].append(tag)
+                        if progress_fn:
+                            progress_fn(f"✅ {tag} : mise à jour réussie et VM saine")
+                        continue
+                    raise ValueError(f"vérification uptime exit {code}")
+                except Exception as e:
+                    # Échec de vérification -> rollback
+                    try:
+                        rollback_vm(creds, vmid, snapname, pve_host=host)
+                        result["rolled_back"].append(tag + f" (vérification KO : {e})")
+                        if progress_fn:
+                            progress_fn(f"↩️ {tag} : vérification échouée ({e}) → ROLLBACK vers {snapname}")
+                    except Exception as re_err:
+                        result["failed"].append(tag + f" (rollback impossible : {re_err})")
+                        if progress_fn:
+                            progress_fn(f"🚨 {tag} : rollback impossible ({re_err})")
+            else:
+                # apt a échoué -> rollback
+                try:
+                    rollback_vm(creds, vmid, snapname, pve_host=host)
+                    result["rolled_back"].append(tag + " (échec apt → rollback)")
+                    if progress_fn:
+                        progress_fn(f"↩️ {tag} : échec de mise à jour → ROLLBACK vers {snapname}\n{res[:200]}")
+                except Exception as re_err:
+                    result["failed"].append(tag + f" (échec apt, rollback impossible : {re_err})")
+                    if progress_fn:
+                        progress_fn(f"🚨 {tag} : échec apt et rollback impossible ({re_err})")
+    return result
+
+
 def check_and_report(creds: dict, notify_ntfy: bool = True, log_fn=None) -> tuple:
     """
     Vérifie le cluster Proxmox, produit le rapport, le sauvegarde,

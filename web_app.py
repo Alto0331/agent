@@ -297,6 +297,9 @@ class Handler(BaseHTTPRequestHandler):
                 "watched_services": json.dumps(creds.get("watched_services", []), ensure_ascii=False, indent=2),
                 "watchdog_interval_min": creds.get("watchdog_interval_min", 5),
                 "alert_email": creds.get("alert_email", ""),
+                "auto_update_enabled": bool(creds.get("auto_update_enabled")),
+                "auto_update_time": creds.get("auto_update_time", "00:00"),
+                "update_blacklist": creds.get("update_blacklist", []),
             })
 
         if u.path == "/api/sessions":
@@ -417,6 +420,7 @@ class Handler(BaseHTTPRequestHandler):
                 "proxmox_enabled", "proxmox_url", "proxmox_token", "proxmox_secret",
                 "ntfy_enabled", "ntfy_url", "ntfy_topic", "announce_ip",
                 "watched_services", "watchdog_interval_min", "alert_email",
+                "auto_update_enabled", "auto_update_time", "update_blacklist",
             ]
             payload = {k: v for k, v in data.items() if k in allowed and v != ""}
             try:

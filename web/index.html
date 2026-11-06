@@ -344,6 +344,13 @@ async function openSettings(){
   <label>Serveur ntfy</label><input id="set-ntfy-url" class="txt" placeholder="https://ntfy.sh">
   <label>Topic</label><input id="set-ntfy-topic" class="txt" placeholder="mon-topic-secret-vm">
   <p class="mut" style="margin-top:6px">📱 Abonne-toi au topic dans l'app ntfy pour recevoir les alertes sur ton téléphone.</p>
+  <h2>🔄 Mise à jour automatique des VMs Debian</h2>
+  <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="set-au-enabled" style="width:auto"> Mise à jour planifiée activée</label>
+  <label>Heure (HH:MM)</label>
+  <input id="set-au-time" class="txt" placeholder="00:00">
+  <label>VMs à ignorer (IDs séparés par des virgules)</label>
+  <input id="set-au-blacklist" class="txt" placeholder="101,105">
+  <p class="mut" style="margin-top:4px">Chaque nuit à l'heure choisie : snapshot → apt upgrade → vérification → rollback automatique si problème. Nécessite le qemu-guest-agent dans les VMs.</p>
   <h2>🔐 Coffre de clés (sauvegarde par mail)</h2>
   <p class="mut">Chiffre toutes tes clés et réglages (AES-256) et les envoie par mail à l'adresse de l'agent. Restaure tout sur n'importe quelle VM avec le même mail + mot de passe maître. Rien ne transite par GitHub.</p>
   <label>Mot de passe maître (8 caractères min.)</label>
@@ -379,6 +386,9 @@ async function openSettings(){
   $('set-ntfy-topic').value=s.ntfy_topic||'';
   $('set-announce-ip').value=s.announce_ip||'';
   $('set-watched-services').value=s.watched_services||'[]';
+  $('set-au-enabled').checked=s.auto_update_enabled||false;
+  $('set-au-time').value=s.auto_update_time||'00:00';
+  $('set-au-blacklist').value=(s.update_blacklist||[]).join(',');
   $('set-watchdog-interval').value=s.watchdog_interval_min||5;
   $('set-alert-email').value=s.alert_email||'';
   api('network').then(function(n){
@@ -577,6 +587,9 @@ async function saveAll(){
     return;}
   payload.watchdog_interval_min=parseInt($('set-watchdog-interval').value)||5;
   payload.alert_email=$('set-alert-email').value;
+  payload.auto_update_enabled=$('set-au-enabled').checked;
+  payload.auto_update_time=$('set-au-time').value||'00:00';
+  payload.update_blacklist=$('set-au-blacklist').value.split(',').map(x=>x.trim()).filter(Boolean);
   const g=id=>$(id).value.trim();
   if(g('set-orkey'))payload.openrouter_key=g('set-orkey');
   if(g('set-mistralkey'))payload.mistral_api_key=g('set-mistralkey');

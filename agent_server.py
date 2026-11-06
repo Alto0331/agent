@@ -1361,6 +1361,20 @@ BRAIN_TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "update_vms",
+            "description": "Met à jour toutes les VMs Debian/Ubuntu (apt upgrade) via le guest-agent, avec snapshot avant chaque VM et rollback automatique si un problème survient. ATTENTION : opération longue et intrusive — demande TOUJOURS la confirmation de l'utilisateur via ask_human AVANT d'appeler cet outil (sauf si la mise à jour planifiée était déjà convenue). L'exécution se fait en arrière-plan : le suivi arrive dans le chat et par notification.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "blacklist": {"type": "array", "items": {"type": "string"}, "description": "IDs des VMs à ignorer (optionnel)."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "finish",
             "description": "Termine la mission avec un résumé final complet. À appeler quand la mission est accomplie et validée.",
             "parameters": {
@@ -1673,6 +1687,13 @@ def run_mistral_brain_loop(task: str, app_instance, use_mistral_tandem=True):
                 log_msg(f"🖥️ Action Proxmox : {action} sur VM {vmid}" + (f" (hôte {pve_host})" if pve_host else "") + "\n", "agent")
                 result = proxmox_monitor.vm_action(load_credentials(), vmid, action, pve_host=pve_host)
 
+            elif fn == "update_vms":
+                blacklist = fn_args.get("blacklist") or []
+                log_msg("🔄 Mise à jour des VMs Debian lancée en arrière-plan (snapshot → apt → vérification → rollback si besoin).\n", "agent")
+                threading.Thread(target=_run_auto_update, args=(load_credentials(),), daemon=True).start()
+                result = ("Mise à jour des VMs lancée en arrière-plan. Le détail de chaque VM (snapshot, apt, vérification, "
+                          "rollback éventuel) arrive dans le chat et par notification. Termine en rappelant que le rapport complet suivra.")
+
             elif fn == "generate_image":
                 log_msg(f"🎨 Génération image : {fn_args.get('description', '')[:100]}\n", "agent")
                 result = brain_generate_image(
@@ -1733,6 +1754,97 @@ def brain_generate_image(path: str, description: str, width: int = 1200, height:
         )
     except Exception as e:
         return f"Erreur génération image : {e}"
+
+
+# ==============================================================================
+# MISE À JOUR AUTOMATIQUE DES VMs DEBIAN (planifiée, ex. chaque nuit à minuit)
+# ==============================================================================
+
+def _auto_update_progress(message: str):
+    """Diffuse l'avancement de la mise à jour : app PC + interface web."""
+    try:
+        inst = RemoteAppInstance(conn=None)
+        inst.log("🔄 [MàJ VMs] " + message + "\n", "system")
+    except Exception:
+        pass
+    try:
+        import web_app
+        web_app.HUB.append_log("🔄 [MàJ VMs] " + message + "\n", "system")
+    except Exception:
+        pass
+
+
+def _auto_update_report(creds: dict, result: dict):
+    """Rapport final de la mise à jour : résumé + notifications (ntfy/web/app/email)."""
+    updated = result.get("updated", [])
+    rolled = result.get("rolled_back", [])
+    failed = result.get("failed", [])
+    skipped = result.get("skipped", [])
+    lines = [f"📊 RÉSULTAT DE LA MISE À JOUR DES VMs :",]
+    if updated:
+        lines.append(f"✅ Mises à jour ({len(updated)}) : " + ", ".join(updated))
+    if rolled:
+        lines.append(f"↩️ Rollback après échec ({len(rolled)}) : " + "\n   ".join(rolled))
+    if failed:
+        lines.append(f"❌ Échecs ({len(failed)}) : " + "\n   ".join(failed))
+    if skipped:
+        lines.append(f"⏭️ Ignorées ({len(skipped)}) : " + "\n   ".join(skipped))
+    report = "\n".join(lines)
+    priority = "urgent" if (failed or rolled) else "default"
+    tags = "rotating_light" if (failed or rolled) else "white_check_mark"
+    title = f"MàJ VMs : {len(updated)} OK" + (f", {len(rolled)} rollback" if rolled else "") + (f", {len(failed)} échec(s)" if failed else "")
+    _watchdog_notify(creds, title, report, priority=priority, tags=tags)
+
+
+def _run_auto_update(creds: dict):
+    """Lance la mise à jour de toutes les VMs Debian avec notifications complètes."""
+    try:
+        _auto_update_progress("Démarrage de la mise à jour planifiée des VMs Debian/Ubuntu…")
+        blacklist = creds.get("update_blacklist") or []
+        if isinstance(blacklist, str):
+            blacklist = [b.strip() for b in blacklist.split(",") if b.strip()]
+        result = proxmox_monitor.update_all_vms(creds, batch_size=3, blacklist=blacklist,
+                                               progress_fn=_auto_update_progress)
+        _auto_update_report(creds, result)
+    except Exception as e:
+        _watchdog_notify(creds, "MàJ VMs : erreur", f"La mise à jour automatique a échoué : {e}",
+                         priority="urgent", tags="rotating_light")
+
+
+def _seconds_until(hhmm: str) -> int:
+    """Secondes jusqu'à la prochaine occurrence de HH:MM (aujourd'hui ou demain)."""
+    try:
+        parts = str(hhmm).strip().split(":")
+        target_h, target_m = int(parts[0]), int(parts[1])
+    except Exception:
+        target_h, target_m = 0, 0
+    now = time.localtime()
+    now_s = now.tm_hour * 3600 + now.tm_min * 60 + now.tm_sec
+    target_s = (target_h * 60 + target_m) * 60
+    delta = target_s - now_s
+    if delta <= 0:
+        delta += 24 * 3600
+    return delta
+
+
+def _auto_update_loop():
+    """Planificateur : chaque nuit à auto_update_time (défaut 00:00) si activé.
+    Aucun token LLM — pur API Proxmox + notifications."""
+    while True:
+        try:
+            creds = load_credentials()
+            if creds.get("auto_update_enabled") and creds.get("proxmox_enabled"):
+                delay = _seconds_until(creds.get("auto_update_time") or "00:00")
+                time.sleep(delay)
+                # Re-lit la config au réveil (elle a pu changer pendant le sommeil)
+                creds = load_credentials()
+                if creds.get("auto_update_enabled") and creds.get("proxmox_enabled"):
+                    _run_auto_update(creds)
+            else:
+                time.sleep(600)  # re-vérifie la config toutes les 10 min si désactivé
+        except Exception as e:
+            print(f"[AutoUpdate] Erreur boucle : {e}")
+            time.sleep(600)
 
 
 # ==============================================================================
@@ -2316,6 +2428,7 @@ if __name__ == "__main__":
     threading.Thread(target=_watchdog_loop, daemon=True).start()
     threading.Thread(target=_proxmox_monitor_loop, daemon=True).start()
     threading.Thread(target=_service_watchdog_loop, daemon=True).start()
+    threading.Thread(target=_auto_update_loop, daemon=True).start()
 
     try:
         import web_app
