@@ -517,7 +517,12 @@ class AgentClientApp:
         tk.Entry(g_nt, textvariable=self.var_ntfy_topic, bg="#0f172a", fg="white", insertbackground="white", relief=tk.FLAT).grid(row=1, column=1, sticky="ew", padx=6, pady=2, ipady=2)
         g_nt.columnconfigure(1, weight=1)
 
-        tk.Label(tab_superv, text="💡 Token : Proxmox → Datacenter → Permissions → API Tokens (lecture seule suffit pour surveiller).\n📱 Abonne-toi au topic dans l'app ntfy pour recevoir les alertes.",
+        tk.Label(tab_superv, text=("💡 Token ID complet requis : root@pam!nomDuToken (utilisateur@realm!nom, tout collé)\n"
+                  "    — Proxmox → Datacenter → Permissions → API Tokens. Copie bien l'UUID Secret généré.\n"
+                  "    — URL : le port 8006 est ajouté automatiquement si absent (ex : 192.168.1.10 suffit)\n"
+                  "    — Lecture seule suffit pour SURVEILLER ; les actions start/stop/reboot\n"
+                  "      exigent le privilège VM.PowerMgmt (sinon erreur 403 de l'API Proxmox).\n"
+                  "📱 Abonne-toi au topic dans l'app ntfy pour recevoir les alertes sur ton téléphone."),
             fg="#94a3b8", bg="#1e293b", justify=tk.LEFT, font=("Segoe UI", 7)).pack(anchor="w", pady=(4, 0))
 
         # --- ONGLET 7 : RESEAU (ADRESSE IP ANNONCEE) ---
