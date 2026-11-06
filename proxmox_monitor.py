@@ -368,20 +368,24 @@ def vm_action(creds: dict, vmid: int, action: str, node: str = None) -> str:
     if not (url and token and secret):
         return "Proxmox non configuré (URL/token/secret manquants)."
 
-    # Trouve le nœud de la VM si non fourni
+    # Trouve le nœud ET le type (qemu/lxc) de la VM via le snapshot
+    vm_type = None
     if not node:
         try:
             snapshot = get_cluster_snapshot(url, token, secret)
             for v in snapshot["vms"]:
                 if str(v.get("vmid")) == str(vmid):
                     node = v.get("node")
+                    vm_type = v.get("type")
                     break
         except Exception as e:
             return f"Impossible de localiser la VM {vmid} : {e}"
     if not node:
         return f"VM {vmid} introuvable dans le cluster."
 
-    endpoint = "/nodes/" + node + ("/qemu/" if True else "/lxc/") + f"{vmid}/status/{action}"
+    # Type réel de la cible : lxc (conteneur) ou qemu (machine virtuelle)
+    endpoint_type = "/lxc/" if vm_type == "lxc" else "/qemu/"
+    endpoint = "/nodes/" + node + endpoint_type + f"{vmid}/status/{action}"
     try:
         _api_request(url, token, secret, method="POST", data={"path": endpoint, "body": {}})
         return f"Action '{action}' envoyée à la VM {vmid} (nœud {node}). Vérifie l'état réel avec proxmox_status après quelques secondes."
