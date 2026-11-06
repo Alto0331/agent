@@ -22,10 +22,6 @@ import imaplib
 import email
 from email.message import EmailMessage
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes
-
 VAULT_SUBJECT = "[COFFRE AGENT]"
 VAULT_FILENAME = "coffre_agent.vault"
 PBKDF2_ITERATIONS = 200_000
@@ -52,8 +48,21 @@ VAULT_FIELDS = [
 # CHIFFREMENT
 # ==============================================================================
 
+def _crypto_lib():
+    """Importe la lib cryptography uniquement à l'usage (le serveur démarre même
+    si elle n'est pas encore installée ; erreur claire à l'usage du coffre)."""
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+        from cryptography.hazmat.primitives import hashes
+        return AESGCM, PBKDF2HMAC, hashes
+    except ImportError:
+        raise ImportError("Lib 'cryptography' non installée : elle s'installe automatiquement au démarrage du serveur (pip install cryptography). Relance agent_server.py.")
+
+
 def _derive_key(master_password: str, salt: bytes) -> bytes:
     """Dérive une clé AES-256 du mot de passe maître (PBKDF2-SHA256, 200k itérations)."""
+    _, PBKDF2HMAC, hashes = _crypto_lib()
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
@@ -70,6 +79,7 @@ def encrypt_vault(data: dict, master_password: str) -> bytes:
     salt = os.urandom(16)
     nonce = os.urandom(12)
     key = _derive_key(master_password, salt)
+    AESGCM, _, _ = _crypto_lib()
     plaintext = json.dumps(data, ensure_ascii=False).encode("utf-8")
     cipher = AESGCM(key).encrypt(nonce, plaintext, None)
     return salt + nonce + cipher
@@ -81,6 +91,7 @@ def decrypt_vault(blob: bytes, master_password: str) -> dict:
         raise ValueError("Coffre invalide ou corrompu.")
     salt, nonce, cipher = blob[:16], blob[16:28], blob[28:]
     key = _derive_key(master_password, salt)
+    AESGCM, _, _ = _crypto_lib()
     try:
         plaintext = AESGCM(key).decrypt(nonce, cipher, None)
     except Exception:

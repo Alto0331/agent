@@ -1747,11 +1747,16 @@ _WATCHDOG_STATE = {
 
 
 def _check_http_service(url: str, expected_status: int = 200, timeout: int = 10):
-    """Check HTTP : suit les redirections, compare le statut final à l'attendu."""
+    """Check HTTP : suit les redirections, compare le statut final à l'attendu.
+    Les statuts 4xx/5xx (HTTPError) sont gérés comme des statuts, pas des crashes."""
+    expected = int(expected_status or 200)
     req = urllib.request.Request(url, headers={"User-Agent": "AgentVM-Watchdog/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        ok = (resp.status == int(expected_status or 200))
-        return ok, f"HTTP {resp.status}"
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return (resp.status == expected), f"HTTP {resp.status}"
+    except urllib.error.HTTPError as e:
+        # Un 4xx/5xx est un statut valide à comparer (ex : expected_status 503)
+        return (e.code == expected), f"HTTP {e.code}"
 
 
 def _check_tcp_service(target: str, timeout: int = 5):
@@ -2148,11 +2153,12 @@ def handle_client(conn, addr):
                     try:
                         msg_confirm, fields = vault.restore_vault_via_gmail(load_credentials(), msg.get("master_password", ""))
                         if fields:
-                            save_credentials(fields)
+                            saved = save_credentials(fields)
                             if "trusted_senders" in fields:
                                 save_trusted_senders(fields["trusted_senders"])
-                            configure_runtime_for_mode("local" if fields.get("use_ollama") else fields.get("engine_mode", "terra"), fields)
-                            app_instance.engine_mode = "local" if fields.get("use_ollama") else fields.get("engine_mode", "terra")
+                            new_mode = "local" if saved.get("use_ollama") else saved.get("engine_mode", "terra")
+                            configure_runtime_for_mode(new_mode, saved)
+                            app_instance.engine_mode = new_mode
                         app_instance.log(msg_confirm + "\n", "system")
                     except Exception as e:
                         app_instance.log(f"❌ Coffre : échec de la restauration ({e})\n", "error")
