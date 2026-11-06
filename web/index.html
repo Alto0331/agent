@@ -344,6 +344,14 @@ async function openSettings(){
   <label>Serveur ntfy</label><input id="set-ntfy-url" class="txt" placeholder="https://ntfy.sh">
   <label>Topic</label><input id="set-ntfy-topic" class="txt" placeholder="mon-topic-secret-vm">
   <p class="mut" style="margin-top:6px">📱 Abonne-toi au topic dans l'app ntfy pour recevoir les alertes sur ton téléphone.</p>
+  <h2>🔐 Coffre de clés (sauvegarde par mail)</h2>
+  <p class="mut">Chiffre toutes tes clés et réglages (AES-256) et les envoie par mail à l'adresse de l'agent. Restaure tout sur n'importe quelle VM avec le même mail + mot de passe maître. Rien ne transite par GitHub.</p>
+  <label>Mot de passe maître (8 caractères min.)</label>
+  <input id="set-vault-pass" class="txt" type="password" placeholder="Mot de passe maître du coffre">
+  <div style="display:flex;gap:8px;margin-top:8px">
+    <button class="btn" onclick="vaultSave()">💾 Sauvegarder</button>
+    <button class="btn sec" onclick="vaultRestore()">📥 Restaurer</button>
+  </div>
   <h2>🔁 Watchdog de services</h2>
   <label>Services surveillés (JSON)</label>
   <textarea id="set-watched-services" class="txt" style="min-height:90px;font-size:12px;font-family:monospace" placeholder='[{"name":"Site vitrine","check":"http","url":"https://monsite.fr","vmid":101,"pve_host":"pve1","auto_restart":true}]'></textarea>
@@ -488,6 +496,24 @@ async function openProblems(){
   const r2=await api('missions');
   const mc2=document.createElement('div');mc2.className='card';mc2.style.cssText='font-size:12px;line-height:1.8';
   mc2.innerHTML=r2.html||'Aucune mission enregistrée.';c.appendChild(mc2);}
+async function vaultSave(){
+  const p=$('set-vault-pass').value;
+  if(p.length<8){toast('Mot de passe maître : 8 caractères minimum',false);return;}
+  if(!confirm('Chiffrer toutes les clés et les envoyer par mail à l\u2019adresse de l\u2019agent ?'))return;
+  toast('Chiffrement et envoi du coffre\u2026');
+  try{
+    const r=await api('vault_save',{master_password:p});
+    if(r.ok)toast('Coffre sauvegardé et envoyé \u2705');else toast(r.error||'Erreur',false);
+  }catch(e){toast('Erreur : '+(e.message||e),false);}}
+async function vaultRestore(){
+  const p=$('set-vault-pass').value;
+  if(p.length<8){toast('Mot de passe maître : 8 caractères minimum',false);return;}
+  if(!confirm('Récupérer le dernier coffre depuis le mail et appliquer ses clés sur CETTE VM ?'))return;
+  toast('Recherche et déchiffrement du coffre\u2026');
+  try{
+    const r=await api('vault_restore',{master_password:p});
+    if(r.ok){toast('Coffre restauré \u2705');openSettings();}else toast(r.error||'Erreur',false);
+  }catch(e){toast('Erreur : '+(e.message||e),false);}}
 async function proxmoxCheck(){
   toast('Vérification Proxmox en cours…');
   const r=await api('proxmox_check',{});

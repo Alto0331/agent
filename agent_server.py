@@ -27,7 +27,8 @@ DEPENDENCIES = {
     'fitz': 'pymupdf',
     'docx': 'python-docx',
     'requests': 'requests',
-    'ddgs': 'ddgs'
+    'ddgs': 'ddgs',
+    'cryptography': 'cryptography'
 }
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1083,6 +1084,7 @@ def _watchdog_loop():
 
 import agent_hooks
 import proxmox_monitor
+import vault
 proxmox_monitor.init(BASE_DIR)
 agent_hooks.fetch_mailbox = fetch_mailbox
 
@@ -2133,6 +2135,27 @@ def handle_client(conn, addr):
                         app_instance.engine_mode = "terra"
                         configure_runtime_for_mode("terra")
                         app_instance.log("🚀 Mode TERRA (OpenAI GPT-6.1 Terra) activé.\n", "system")
+
+                elif msg_type == "vault_save":
+                    try:
+                        msg_confirm = vault.send_vault_via_gmail(load_credentials(), msg.get("master_password", ""),
+                                                                 trusted_senders=load_trusted_senders())
+                        app_instance.log(msg_confirm + "\n", "system")
+                    except Exception as e:
+                        app_instance.log(f"❌ Coffre : échec de la sauvegarde ({e})\n", "error")
+
+                elif msg_type == "vault_restore":
+                    try:
+                        msg_confirm, fields = vault.restore_vault_via_gmail(load_credentials(), msg.get("master_password", ""))
+                        if fields:
+                            save_credentials(fields)
+                            if "trusted_senders" in fields:
+                                save_trusted_senders(fields["trusted_senders"])
+                            configure_runtime_for_mode("local" if fields.get("use_ollama") else fields.get("engine_mode", "terra"), fields)
+                            app_instance.engine_mode = "local" if fields.get("use_ollama") else fields.get("engine_mode", "terra")
+                        app_instance.log(msg_confirm + "\n", "system")
+                    except Exception as e:
+                        app_instance.log(f"❌ Coffre : échec de la restauration ({e})\n", "error")
 
                 elif msg_type == "sync_credentials":
                     saved = apply_credentials_sync(msg, app_instance)

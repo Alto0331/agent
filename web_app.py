@@ -438,6 +438,31 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json({"ok": False, "error": str(e)})
 
+        if u.path == "/api/vault_save":
+            try:
+                import vault
+                creds = HUB.hooks["load_credentials"]()
+                confirm = vault.send_vault_via_gmail(creds, data.get("master_password", ""),
+                                                     trusted_senders=HUB.hooks["load_trusted_senders"]())
+                HUB.append_log("🔐 [Coffre] " + confirm + "\n", "system")
+                return self._json({"ok": True, "message": confirm})
+            except Exception as e:
+                return self._json({"ok": False, "error": str(e)})
+
+        if u.path == "/api/vault_restore":
+            try:
+                import vault
+                creds = HUB.hooks["load_credentials"]()
+                confirm, fields = vault.restore_vault_via_gmail(creds, data.get("master_password", ""))
+                if fields:
+                    HUB.hooks["save_credentials"](fields)
+                    if "trusted_senders" in fields:
+                        HUB.hooks["save_trusted_senders"](fields["trusted_senders"])
+                HUB.append_log("🔐 [Coffre] " + confirm + "\n", "system")
+                return self._json({"ok": True, "message": confirm})
+            except Exception as e:
+                return self._json({"ok": False, "error": str(e)})
+
         if u.path == "/api/trust":
             email = str(data.get("email", "")).strip().lower()
             add = bool(data.get("add", True))

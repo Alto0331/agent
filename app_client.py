@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from tkinter import messagebox
 from tkinter import ttk, filedialog
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_config.json")
@@ -577,6 +578,39 @@ class AgentClientApp:
         tk.Label(tab_net, text="📱 Téléphone : http://<cette IP>:8765 · Console : http://<cette IP>:65432 (app PC)",
             fg="#94a3b8", bg="#1e293b", justify=tk.LEFT, font=("Segoe UI", 7)).pack(anchor="w", pady=(4, 0))
 
+        # --- ONGLET 8 : COFFRE DE CLÉS (SAUVEGARDE PAR MAIL) ---
+        tab_vault = tk.Frame(self.notebook, bg="#1e293b", padx=8, pady=8)
+        self.notebook.add(tab_vault, text="🔐 Coffre")
+
+        tk.Label(
+            tab_vault,
+            text=("💡 Chiffre toutes tes clés et réglages (AES-256-GCM) et les envoie par mail\n"
+                  "à l'adresse de l'agent. Restaure tout sur n'importe quelle VM avec le même\n"
+                  "mail et le mot de passe maître. Aucune donnée ne transite par GitHub.\n"
+                  "Le mot de passe maître n'est JAMAIS stocké : garde-le précieusement,\n"
+                  "sans lui le coffre est indéchiffrable (même pour nous)."),
+            fg="#94a3b8", bg="#1e293b", justify=tk.LEFT, font=("Segoe UI", 7)
+        ).pack(anchor="w", pady=(0, 6))
+
+        g_vault = tk.Frame(tab_vault, bg="#1e293b")
+        g_vault.pack(fill=tk.X)
+        tk.Label(g_vault, text="Mot de passe maître :", fg="#fde047", bg="#1e293b", font=("Segoe UI", 8, "bold")).grid(row=0, column=0, sticky="w", pady=3)
+        self.var_vault_pass = tk.StringVar()
+        self.ent_vault_pass = tk.Entry(g_vault, textvariable=self.var_vault_pass, show="*", bg="#0f172a", fg="#fde047", insertbackground="white", relief=tk.FLAT, font=("Consolas", 9))
+        self.ent_vault_pass.grid(row=0, column=1, sticky="ew", padx=6, pady=3, ipady=2)
+        tk.Button(g_vault, text="👁", bg="#334155", fg="white", bd=0, padx=6,
+                  command=lambda: self._toggle_password_visibility(self.ent_vault_pass)).grid(row=0, column=2, padx=2)
+        g_vault.columnconfigure(1, weight=1)
+
+        vault_btns = tk.Frame(tab_vault, bg="#1e293b")
+        vault_btns.pack(fill=tk.X, pady=(6, 0))
+        tk.Button(vault_btns, text="💾 Sauvegarder le coffre (envoyer par mail)",
+            bg="#0284c7", fg="white", bd=0, activebackground="#0369a1", activeforeground="white",
+            font=("Segoe UI", 8, "bold"), pady=5, command=self.vault_save).pack(fill=tk.X, pady=(0, 4))
+        tk.Button(vault_btns, text="📥 Restaurer le coffre (importer depuis le mail)",
+            bg="#059669", fg="white", bd=0, activebackground="#047857", activeforeground="white",
+            font=("Segoe UI", 8, "bold"), pady=5, command=self.vault_restore).pack(fill=tk.X)
+
         # --- BOUTON GLOBAL DE SAUVEGARDE & SYNCHRONISATION ---
         tk.Button(
             self.settings_inner,
@@ -591,6 +625,32 @@ class AgentClientApp:
             bg="#7c3aed", fg="white", bd=0, activebackground="#6d28d9", activeforeground="white",
             font=("Segoe UI", 8, "bold"), pady=5, command=self.check_for_updates
         ).pack(fill=tk.X, pady=(2, 2))
+
+    def vault_save(self):
+        p = self.var_vault_pass.get().strip()
+        if len(p) < 8:
+            self.append_log("❌ Coffre : le mot de passe maître doit faire au moins 8 caractères.\n", "error")
+            return
+        if not self.connected or not self.sock:
+            self.append_log("❌ Coffre : connecte-toi d'abord à la VM (l'envoi se fait par son mail).\n", "error")
+            return
+        if not messagebox.askyesno("Coffre", "Chiffrer toutes les clés et les envoyer par mail à l'adresse de l'agent ?"):
+            return
+        self._send_json({"type": "vault_save", "master_password": p})
+        self.append_log("🔐 Coffre : chiffrement et envoi en cours…\n", "system")
+
+    def vault_restore(self):
+        p = self.var_vault_pass.get().strip()
+        if len(p) < 8:
+            self.append_log("❌ Coffre : le mot de passe maître doit faire au moins 8 caractères.\n", "error")
+            return
+        if not self.connected or not self.sock:
+            self.append_log("❌ Coffre : connecte-toi d'abord à la VM (la restauration passe par son mail).\n", "error")
+            return
+        if not messagebox.askyesno("Coffre", "Récupérer le dernier coffre depuis le mail et appliquer ses clés sur la VM ?"):
+            return
+        self._send_json({"type": "vault_restore", "master_password": p})
+        self.append_log("🔐 Coffre : recherche et déchiffrement en cours…\n", "system")
 
     def _toggle_password_visibility(self, entry_widget: tk.Entry):
         current = entry_widget.cget("show")
